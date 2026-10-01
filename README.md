@@ -1,28 +1,90 @@
-# PHP-Music-Lite
+# PHP-Music Lite
 
-<img width="720" height="1442" alt="1" src="https://github.com/user-attachments/assets/970c73b7-4296-4cc6-8c5d-5f9d7c037d82" />
+<img width="1280" height="720" alt="1790888202712463711916972440333" src="https://github.com/user-attachments/assets/3707cddd-aa71-4773-8776-7b1cd5d2f71b" />
 
+**PHP-Music Lite** is a fast, ultra-lightweight, single-file music streaming server and web player. Inspired by the YouTube Music interface, it serves as the zero-dependency, portable alternative to [HirotakaDango/PHP-Music](https://github.com/HirotakaDango/PHP-Music).
 
-A lightweight, single-file web-based music player built using PHP, HTML5, CSS, and vanilla JavaScript. It scans a local directory for MP3 files and allows users to listen to music, create custom playlists, and export/import their playlist configurations.
+Drop a single PHP file into your music folder, run the scanner, and stream your collection across desktop and mobile devices.
+
+---
+
+## Highlights
+
+- **Single-File Architecture:** Frontend, backend API, and database migrations bundled into one file.
+- **SQLite Database:** Zero database setup required; creates and maintains a local `music.db` with WAL mode enabled.
+- **Fast Chunked Streaming:** Supports HTTP `206 Partial Content` byte-range seeking with unbuffered 32KB chunk streaming for smooth playback on low-bandwidth networks.
+- **OPFS Client Caching:** Uses the browser's Origin Private File System (OPFS) to cache played tracks for instant replays.
+- **PWA Ready:** Installable as a Progressive Web App on mobile and desktop with background media playback via the MediaSession API.
+- **Modern Responsive UI:** YouTube Music-inspired dark theme, mobile fullscreen player modal, drag-and-drop playlist reordering, and metadata inspectors.
+
+---
 
 ## Features
 
-- **Local Library Scanning**: Automatically scans the `./music` directory recursively for MP3 files using PHP.
-- **Dynamic Loading**: Loads library tracks in batches of 25 (lazy loading) to ensure performance remains smooth with larger directories.
-- **Search & Filter**: Real-time filtering for both the local library and custom playlists.
-- **Custom Playlists**: Add or remove tracks from a personal playlist saved locally in your browser's `localStorage`.
-- **Import & Export**: Save your customized playlist as a JSON file or import a previously exported one.
-- **Responsive Web Player**: Mobile-friendly player interface with play, pause, skip, backward, track progress slider, and duration indicators.
+- **Audio Support:** Streams `.mp3`, `.m4a`, `.flac`, `.ogg`, and `.wav`.
+- **Automatic Tag & Art Extraction:** Uses [getID3](https://github.com/JamesHeinrich/getID3) to extract titles, artists, albums, years, and bitrates, converting cover art to WebP (300×300) to save storage and bandwidth.
+- **Library Views:** Browse by All Songs, Albums, Artists, Favorites, and Custom Playlists.
+- **Playlist Management:**
+  - Create, rename, and delete playlists.
+  - Reorder songs using drag-and-drop (via SortableJS).
+  - Export and import playlists to/from `.json` files.
+- **User Authentication:** Multi-user support with session persistence (1-year cookie lifetime), password hashing (`PASSWORD_DEFAULT`), and user-specific favorites/playlists.
+- **Deep Linking / Sharing:** Generates direct share links for individual songs, albums, artists, or playlists.
+
+---
 
 ## Requirements
 
-- A web server running **PHP** (PHP 5.4+ recommended).
-- Modern web browser with JavaScript enabled.
+- **PHP 7.4+** or **PHP 8.x**
+- PHP Extensions:
+  - `pdo_sqlite`
+  - `gd` (required for WebP cover art resizing)
+- *(Recommended)* [getID3](https://github.com/JamesHeinrich/getID3) extracted into a `./getid3` folder next to the script for ID3 tag parsing.
 
-## Setup Instructions
+---
 
-1. **Clone or download** this repository to your web server's document root (e.g., `htdocs` or `var/www/html`).
-2. Place the main script as `index.php`.
-3. Create a directory named `music` in the same folder:
+## Quick Start
+
+1. **Place the files in your music directory:**
+   ```text
+   /your-music-folder/
+   ├── index.php          (rename player.txt/player.php to index.php)
+   └── getid3/            (optional, recommended)
+       └── getid3.php
+   ```
+
+2. **Start a local PHP test server:**
    ```bash
-   mkdir music
+   php -S 0.0.0.0:8000 -t /your-music-folder/
+   ```
+
+3. **Open the web app:**
+   - Navigate to `http://localhost:8000` in your browser.
+   - Click **Scan All** in the sidebar to index your audio files into `music.db`.
+
+4. **Default Credentials:**
+   The initial scan creates a default library user:
+   - **Email:** `musiclibrary@mail.com`
+   - **Password:** `musiclibrary`
+
+*(You can also register a new account directly through the modal).*
+
+---
+
+## Configuration
+
+You can customize the following constants near the top of the file:
+
+```php
+define('MUSIC_DIR', __DIR__);             // Directory containing your audio files
+define('DB_FILE', __DIR__ . '/music.db'); // Path to SQLite database file
+define('PAGE_SIZE', 25);                  // Number of items per infinite scroll page
+```
+
+---
+
+## Upstream Project
+
+For the full-featured, modular version with extended multi-user administration, transcode management, and advanced features, visit the main repository:
+
+👉 **[HirotakaDango/PHP-Music](https://github.com/HirotakaDango/PHP-Music)**
