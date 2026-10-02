@@ -1,41 +1,51 @@
 <?php
-// Session configured for 1-year lifetime
+// PHP-Music-Lite
+$appVersion = (string)filemtime(__FILE__);
 $one_year = 31536000;
+
 ini_set('session.cookie_lifetime', $one_year);
 ini_set('session.gc_maxlifetime', $one_year);
+
+$isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (isset($_SERVER['SERVER_PORT']) && $_SERVER['SERVER_PORT'] == 443);
 session_set_cookie_params([
   'lifetime' => $one_year,
   'path' => '/',
-  'domain' => $_SERVER['HTTP_HOST'] ?? '',
-  'secure' => (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off'),
+  'domain' => '',
+  'secure' => $isHttps,
   'httponly' => true,
   'samesite' => 'Lax'
 ]);
 session_start();
 
+if (empty($_SESSION['csrf_token'])) {
+  $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+
 // Security Headers
 header('X-Content-Type-Options: nosniff');
 header('X-Frame-Options: SAMEORIGIN');
 header('Referrer-Policy: strict-origin-when-cross-origin');
+header("Content-Security-Policy: default-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com https://fonts.gstatic.com data: blob:; img-src 'self' data: blob:; media-src 'self' blob:;");
 
 // PWA Handler
 if (isset($_GET['pwa'])) {
   if ($_GET['pwa'] === 'manifest') {
     header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-cache, no-store, must-revalidate');
     echo json_encode([
-      "name" => "PHP-Music-Lite",
-      "short_name" => "Music Lite",
-      "start_url" => ".",
+      "name" => "PHPMusic Lite",
+      "short_name" => "PHPMusic Lite",
+      "start_url" => "./",
       "display" => "standalone",
-      "background_color" => "#030303",
+      "background_color" => "#0d0d0d",
       "theme_color" => "#121212",
       "description" => "A fast, lightweight music player.",
       "icons" => [
         [
-          "src" => "?action=get_app_icon",
+          "src" => "?action=get_app_icon&v=" . $appVersion,
           "sizes" => "any",
           "type" => "image/svg+xml",
-          "purpose" => "any"
+          "purpose" => "any maskable"
         ]
       ]
     ]);
@@ -43,10 +53,10 @@ if (isset($_GET['pwa'])) {
   }
   if ($_GET['pwa'] === 'sw') {
     header('Content-Type: application/javascript; charset=utf-8');
+    header('Cache-Control: no-cache, no-store, must-revalidate');
     echo <<<SW
-    const CACHE_NAME = 'php-music-lite-v1';
+    const CACHE_NAME = 'php-music-lite-v{$appVersion}';
     const STATIC_ASSETS = [
-      './',
       'https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css',
       'https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css',
       'https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js',
@@ -70,10 +80,27 @@ if (isset($_GET['pwa'])) {
 
     self.addEventListener('fetch', event => {
       const url = new URL(event.request.url);
-      if (url.searchParams.has('action') || url.searchParams.has('share_type') || url.searchParams.has('pwa')) {
+
+      if (event.request.method !== 'GET' || url.searchParams.has('action') || url.searchParams.has('share_type') || url.searchParams.has('pwa')) {
         event.respondWith(fetch(event.request));
         return;
       }
+
+      if (event.request.mode === 'navigate') {
+        event.respondWith(
+          fetch(event.request)
+            .then(networkResp => {
+              if (networkResp && networkResp.ok) {
+                const copy = networkResp.clone();
+                caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
+              }
+              return networkResp;
+            })
+            .catch(() => caches.match(event.request))
+        );
+        return;
+      }
+
       event.respondWith(
         caches.match(event.request).then(cached => cached || fetch(event.request).then(resp => {
           if (resp && resp.ok) {
@@ -89,7 +116,6 @@ SW;
   }
 }
 
-header('Content-Type: text/html; charset=utf-8');
 set_time_limit(0);
 
 define('MUSIC_DIR', __DIR__);
@@ -117,9 +143,17 @@ function send_json($data, $code = 200) {
   if (!headers_sent()) {
     http_response_code($code);
     header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
   }
   echo json_encode($data, JSON_INVALID_UTF8_SUBSTITUTE);
   exit;
+}
+
+function verify_csrf() {
+  $token = $_SERVER['HTTP_X_CSRF_TOKEN'] ?? '';
+  if (!$token || !hash_equals($_SESSION['csrf_token'] ?? '', $token)) {
+    send_json(['status' => 'error', 'message' => 'Invalid or expired CSRF token.'], 403);
+  }
 }
 
 function init_db($db) {
@@ -190,12 +224,6 @@ function init_db($db) {
   $db->exec("CREATE INDEX IF NOT EXISTS playlists_user_id_idx ON playlists(user_id);");
   $db->exec("CREATE INDEX IF NOT EXISTS playlists_public_id_idx ON playlists(public_id);");
   $db->exec("CREATE INDEX IF NOT EXISTS playlist_songs_playlist_id_idx ON playlist_songs(playlist_id);");
-
-  $stmt = $db->query("SELECT id FROM users WHERE email = 'musiclibrary@mail.com'");
-  if (!$stmt->fetch()) {
-    $db->prepare("INSERT INTO users (email, artist, password_hash, verified) VALUES (?, ?, ?, ?)")
-      ->execute(['musiclibrary@mail.com', 'Music Library', password_hash('musiclibrary', PASSWORD_DEFAULT), 'yes']);
-  }
 }
 
 function process_image_to_webp($imageData, $target_width = 300, $quality = 70) {
@@ -234,12 +262,19 @@ if (isset($_GET['action'])) {
   $limit_clause = " LIMIT " . PAGE_SIZE . " OFFSET " . $offset;
 
   switch ($action) {
-    // Original boombox favicon
     case 'get_app_icon':
       header('Content-Type: image/svg+xml');
-      header('Cache-Control: public, max-age=31536000');
-      $size = intval($_GET['size'] ?? 192);
-      echo '<svg xmlns="http://www.w3.org/2000/svg" width="'.$size.'" height="'.$size.'" fill="white" class="bi bi-boombox-fill" viewBox="0 0 16 16"><path d="M11.538 6.237a.5.5 0 0 0-.738.03l-1.36 2.04a.5.5 0 0 0 .37.823h2.72a.5.5 0 0 0 .37-.823l-1.359-2.04a.5.5 0 0 0-.363-.17z"/><path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0zM4.5 5.5a1 1 0 1 0 0-2 1 1 0 0 0 0 2m7 0a1 1 0 1 0 0-2 1 1 0 0 0 0 2M6 6.5a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 0-1h-3a.5.5 0 0 0-.5.5m-1.5 6a.5.5 0 0 0 .5.5h5a.5.5 0 0 0 0-1h-5a.5.5 0 0 0-.5.5"/></svg>';
+      header('Cache-Control: public, max-age=86400');
+      $size = max(16, min(512, intval($_GET['size'] ?? 192)));
+      echo '<svg xmlns="http://www.w3.org/2000/svg" width="'.$size.'" height="'.$size.'" viewBox="0 0 100 100">'
+        . '<rect width="100" height="100" rx="24" fill="#0d0d0d"/>'
+        . '<rect x="13" y="38" width="7.5" height="24" rx="3.75" fill="#ffffff"/>'
+        . '<rect x="27" y="25" width="7.5" height="50" rx="3.75" fill="#ff1953"/>'
+        . '<rect x="41" y="13" width="7.5" height="74" rx="3.75" fill="#ffffff"/>'
+        . '<rect x="55" y="25" width="7.5" height="50" rx="3.75" fill="#ffffff"/>'
+        . '<rect x="69" y="38" width="7.5" height="24" rx="3.75" fill="#ffffff"/>'
+        . '<rect x="83" y="25" width="7.5" height="50" rx="3.75" fill="#ffffff"/>'
+        . '</svg>';
       exit;
 
     case 'get_session':
@@ -248,20 +283,21 @@ if (isset($_GET['action'])) {
         $stmt->execute([$user_id]);
         $user = $stmt->fetch();
         if ($user) {
-          send_json(['status' => 'loggedin', 'user' => $user]);
+          send_json(['status' => 'loggedin', 'user' => $user, 'csrf_token' => $_SESSION['csrf_token']]);
         }
       }
-      send_json(['status' => 'loggedout']);
+      send_json(['status' => 'loggedout', 'csrf_token' => $_SESSION['csrf_token']]);
       break;
 
     case 'register':
+      verify_csrf();
       $data = json_decode(file_get_contents('php://input'), true);
       $email = filter_var($data['email'] ?? '', FILTER_VALIDATE_EMAIL);
       $artist = trim(htmlspecialchars($data['artist'] ?? '', ENT_QUOTES, 'UTF-8'));
       $password = $data['password'] ?? '';
 
       if (!$email || empty($artist) || strlen($password) < 6) {
-        send_json(['status' => 'error', 'message' => 'Password needs 6+ characters.'], 400);
+        send_json(['status' => 'error', 'message' => 'Valid email and password (6+ chars) required.'], 400);
       }
       $stmt = $db->prepare("SELECT id FROM users WHERE email = ?");
       $stmt->execute([$email]);
@@ -276,6 +312,7 @@ if (isset($_GET['action'])) {
       break;
 
     case 'login':
+      verify_csrf();
       $data = json_decode(file_get_contents('php://input'), true);
       $email = filter_var($data['email'] ?? '', FILTER_VALIDATE_EMAIL);
       $password = $data['password'] ?? '';
@@ -290,14 +327,16 @@ if (isset($_GET['action'])) {
         session_regenerate_id(true);
         $_SESSION['user_id'] = $user['id'];
         $_SESSION['user_artist'] = $user['artist'];
+        $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
         unset($user['password_hash']);
-        send_json(['status' => 'success', 'user' => $user]);
+        send_json(['status' => 'success', 'user' => $user, 'csrf_token' => $_SESSION['csrf_token']]);
       } else {
         send_json(['status' => 'error', 'message' => 'Invalid credentials.'], 401);
       }
       break;
 
     case 'logout':
+      verify_csrf();
       $_SESSION = [];
       if (ini_get("session.use_cookies")) {
         $params = session_get_cookie_params();
@@ -308,6 +347,7 @@ if (isset($_GET['action'])) {
       break;
 
     case 'change_name':
+      verify_csrf();
       if (!$user_id) { send_json(['status' => 'error', 'message' => 'Unauthorized'], 403); }
       $data = json_decode(file_get_contents('php://input'), true);
       $new_name = trim(htmlspecialchars($data['artist'] ?? '', ENT_QUOTES, 'UTF-8'));
@@ -321,6 +361,7 @@ if (isset($_GET['action'])) {
       break;
 
     case 'change_password':
+      verify_csrf();
       if (!$user_id) { send_json(['status' => 'error', 'message' => 'Unauthorized'], 403); }
       $data = json_decode(file_get_contents('php://input'), true);
       $new_password = $data['new_password'] ?? '';
@@ -334,6 +375,7 @@ if (isset($_GET['action'])) {
       break;
 
     case 'delete_account':
+      verify_csrf();
       if (!$user_id) { send_json(['status' => 'error', 'message' => 'Unauthorized'], 403); }
       $db->prepare("DELETE FROM users WHERE id = ?")->execute([$user_id]);
       $_SESSION = [];
@@ -346,6 +388,11 @@ if (isset($_GET['action'])) {
       break;
 
     case 'full_scan':
+      $usersCount = (int)$db->query("SELECT COUNT(*) FROM users")->fetchColumn();
+      if ($usersCount > 0 && !$user_id) {
+        http_response_code(403);
+        die("Unauthorized. Please log in to initiate scan.");
+      }
       perform_full_scan($db);
       exit;
 
@@ -376,12 +423,12 @@ if (isset($_GET['action'])) {
 
       $stmt = $db->prepare("
         SELECT m.id, m.title, m.artist, m.album, m.duration, m.user_id,
-        CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+        CASE WHEN ? IS NOT NULL AND f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
         FROM music m
         LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
         {$where_sql} {$order_by} {$limit_clause}
       ");
-      $stmt->execute($params);
+      $stmt->execute(array_merge([$user_id], $params));
       send_json($stmt->fetchAll());
       break;
 
@@ -418,7 +465,7 @@ if (isset($_GET['action'])) {
 
       $stmt = $db->prepare("
         SELECT m.id, m.title, m.artist, m.album, m.duration, m.user_id,
-        CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+        CASE WHEN ? IS NOT NULL AND f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
         FROM music m
         JOIN playlist_songs ps ON m.id = ps.song_id
         JOIN playlists p ON ps.playlist_id = p.id
@@ -426,11 +473,12 @@ if (isset($_GET['action'])) {
         WHERE p.public_id = ?
         {$order_by} {$limit_clause}
       ");
-      $stmt->execute([$user_id, $public_id]);
+      $stmt->execute([$user_id, $user_id, $public_id]);
       send_json($stmt->fetchAll());
       break;
 
     case 'toggle_favorite':
+      verify_csrf();
       if (!$user_id) { send_json(['status' => 'error', 'message' => 'Unauthorized'], 403); }
       $data = json_decode(file_get_contents('php://input'), true);
       $song_id = (int)($data['id'] ?? 0);
@@ -449,6 +497,7 @@ if (isset($_GET['action'])) {
       break;
 
     case 'update_favorite_order':
+      verify_csrf();
       if (!$user_id) { send_json(['status' => 'error', 'message' => 'Unauthorized'], 403); }
       $data = json_decode(file_get_contents('php://input'), true);
       $ordered_ids = $data['ids'] ?? [];
@@ -589,11 +638,11 @@ if (isset($_GET['action'])) {
 
       if ($type === 'playlist') {
         $stmt_details = $db->prepare("
-          SELECT p.name, p.public_id, u.artist as creator,
+          SELECT p.name, p.public_id, COALESCE(u.artist, 'Anonymous') as creator,
           (SELECT COUNT(*) FROM playlist_songs WHERE playlist_id = p.id) as song_count,
           (SELECT SUM(m.duration) FROM music m JOIN playlist_songs ps ON m.id = ps.song_id WHERE ps.playlist_id = p.id) as total_duration,
           (SELECT ps.song_id FROM playlist_songs ps WHERE ps.playlist_id = p.id ORDER BY ps.added_at DESC LIMIT 1) as image_id
-          FROM playlists p JOIN users u ON p.user_id = u.id
+          FROM playlists p LEFT JOIN users u ON p.user_id = u.id
           WHERE p.public_id = ?
         ");
         $stmt_details->execute([$name]);
@@ -612,14 +661,14 @@ if (isset($_GET['action'])) {
 
         $stmt_songs = $db->prepare("
           SELECT m.id, m.title, m.artist, m.album, m.duration, m.user_id,
-          CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+          CASE WHEN ? IS NOT NULL AND f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
           FROM music m
           JOIN playlist_songs ps ON m.id = ps.song_id
           JOIN playlists p ON ps.playlist_id = p.id
           LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
           WHERE p.public_id = ? {$order_by} {$limit_clause}
         ");
-        $stmt_songs->execute([$user_id, $name]);
+        $stmt_songs->execute([$user_id, $user_id, $name]);
         $songs = $stmt_songs->fetchAll();
       } elseif (in_array($type, ['artist', 'album'])) {
         $field = $type;
@@ -645,12 +694,12 @@ if (isset($_GET['action'])) {
 
         $stmt_songs = $db->prepare("
           SELECT m.id, m.title, m.artist, m.album, m.duration, m.user_id,
-          CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+          CASE WHEN ? IS NOT NULL AND f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
           FROM music m
           LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
           WHERE m.{$field} = ? {$order_by} {$limit_clause}
         ");
-        $stmt_songs->execute([$user_id, $name]);
+        $stmt_songs->execute([$user_id, $user_id, $name]);
         $songs = $stmt_songs->fetchAll();
       }
       send_json(['details' => $details, 'songs' => $songs]);
@@ -661,13 +710,13 @@ if (isset($_GET['action'])) {
       $order_by = 'ORDER BY m.title COLLATE NOCASE ASC';
       $stmt = $db->prepare("
         SELECT m.id, m.title, m.artist, m.album, m.duration, m.user_id,
-        CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+        CASE WHEN ? IS NOT NULL AND f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
         FROM music m
         LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
         WHERE (m.title LIKE ? OR m.artist LIKE ? OR m.album LIKE ?)
         {$order_by} {$limit_clause}
       ");
-      $stmt->execute([$user_id, $query, $query, $query]);
+      $stmt->execute([$user_id, $user_id, $query, $query, $query]);
       send_json($stmt->fetchAll());
       break;
 
@@ -675,12 +724,12 @@ if (isset($_GET['action'])) {
       $id = (int)($_GET['id'] ?? 0);
       $stmt = $db->prepare("
         SELECT m.id, m.file, m.title, m.artist, m.album, m.year, m.duration, m.bitrate, m.user_id,
-        CASE WHEN f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
+        CASE WHEN ? IS NOT NULL AND f.song_id IS NOT NULL THEN 1 ELSE 0 END AS is_favorite
         FROM music m
         LEFT JOIN favorites f ON m.id = f.song_id AND f.user_id = ?
         WHERE m.id = ?
       ");
-      $stmt->execute([$user_id, $id]);
+      $stmt->execute([$user_id, $user_id, $id]);
       $song = $stmt->fetch();
       if ($song) {
         $song['stream_url'] = '?action=get_stream&id=' . $song['id'];
@@ -689,7 +738,6 @@ if (isset($_GET['action'])) {
       send_json($song);
       break;
 
-    // Fast bit-by-bit chunked streaming with uncompressed output flush
     case 'get_stream':
       $id = (int)($_GET['id'] ?? 0);
       $stmt = $db->prepare("SELECT file FROM music WHERE id = ?");
@@ -705,7 +753,7 @@ if (isset($_GET['action'])) {
         exit("File not found");
       }
 
-      $realMusicDir = realpath(MUSIC_DIR);
+      $realMusicDir = rtrim(realpath(MUSIC_DIR), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
       $realFilePath = realpath($file_path);
       if (!$realFilePath || strpos($realFilePath, $realMusicDir) !== 0) {
         http_response_code(403);
@@ -715,9 +763,12 @@ if (isset($_GET['action'])) {
       $filesize = filesize($realFilePath);
       $ext = strtolower(pathinfo($realFilePath, PATHINFO_EXTENSION));
       $mimes = ['mp3' => 'audio/mpeg', 'm4a' => 'audio/mp4', 'flac' => 'audio/flac', 'ogg' => 'audio/ogg', 'wav' => 'audio/wav'];
-      $mime_type = $mimes[$ext] ?? 'audio/mpeg';
+      if (!isset($mimes[$ext])) {
+        http_response_code(403);
+        exit("Invalid audio type");
+      }
+      $mime_type = $mimes[$ext];
 
-      // Disable any buffering or compression that blocks streaming on slow connections
       if (function_exists('apache_setenv')) { @apache_setenv('no-gzip', 1); }
       @ini_set('zlib.output_compression', 'Off');
       while (ob_get_level() > 0) { @ob_end_clean(); }
@@ -751,7 +802,7 @@ if (isset($_GET['action'])) {
 
       $fp = fopen($realFilePath, 'rb');
       fseek($fp, $start);
-      $buffer = 32768; // 32KB bit-by-bit streaming buffer
+      $buffer = 32768;
       while (!feof($fp) && ($pos = ftell($fp)) <= $end && !connection_aborted()) {
         if ($pos + $buffer > $end) {
           $buffer = $end - $pos + 1;
@@ -778,7 +829,7 @@ if (isset($_GET['action'])) {
       } else {
         header('Content-Type: image/svg+xml');
         header('Cache-Control: public, max-age=604800');
-        echo '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" fill="#404040" class="bi bi-disc" viewBox="0 0 16 16"><path d="M8 15A7 7 0 1 1 8 1a7 7 0 0 1 0 14zm0 1A8 8 0 1 0 8 0a8 8 0 0 0 0 16z"/><path d="M10 8a2 2 0 1 1-4 0 2 2 0 0 1 4 0z"/></svg>';
+        echo '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100" viewBox="0 0 24 24" fill="#303030"><rect width="24" height="24" rx="4" fill="#181818"/><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 14.5c-2.49 0-4.5-2.01-4.5-4.5S9.51 7.5 12 7.5s4.5 2.01 4.5 4.5-2.01 4.5-4.5 4.5zm0-5.5c-.55 0-1 .45-1 1s.45 1 1 1 1-.45 1-1-.45-1-1-1z" fill="#404040"/></svg>';
       }
       exit;
 
@@ -791,12 +842,12 @@ if (isset($_GET['action'])) {
       $db = null;
       session_write_close();
 
-      $realMusicDir = realpath(MUSIC_DIR);
+      $realMusicDir = rtrim(realpath(MUSIC_DIR), DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
       $realFilePath = realpath($file_path);
       if ($realFilePath && file_exists($realFilePath) && strpos($realFilePath, $realMusicDir) === 0) {
         header('Content-Type: application/octet-stream');
         header('Content-Length: ' . filesize($realFilePath));
-        header('Content-Disposition: attachment; filename="' . basename($realFilePath) . '"');
+        header('Content-Disposition: attachment; filename="' . rawurlencode(basename($realFilePath)) . '"');
         readfile($realFilePath);
         exit;
       } else {
@@ -826,6 +877,7 @@ if (isset($_GET['action'])) {
       break;
 
     case 'create_playlist':
+      verify_csrf();
       if (!$user_id) { send_json(['status' => 'error', 'message' => 'Unauthorized'], 403); }
       $data = json_decode(file_get_contents('php://input'), true);
       $name = trim(htmlspecialchars($data['name'] ?? '', ENT_QUOTES, 'UTF-8'));
@@ -839,6 +891,7 @@ if (isset($_GET['action'])) {
       break;
 
     case 'edit_playlist':
+      verify_csrf();
       if (!$user_id) { send_json(['status' => 'error', 'message' => 'Unauthorized'], 403); }
       $data = json_decode(file_get_contents('php://input'), true);
       $public_id = $data['public_id'] ?? '';
@@ -852,6 +905,7 @@ if (isset($_GET['action'])) {
       break;
 
     case 'delete_playlist':
+      verify_csrf();
       if (!$user_id) { send_json(['status' => 'error', 'message' => 'Unauthorized'], 403); }
       $data = json_decode(file_get_contents('php://input'), true);
       $public_id = $data['public_id'] ?? '';
@@ -861,6 +915,7 @@ if (isset($_GET['action'])) {
       break;
 
     case 'add_to_playlist':
+      verify_csrf();
       if (!$user_id) { send_json(['status' => 'error', 'message' => 'Unauthorized'], 403); }
       $data = json_decode(file_get_contents('php://input'), true);
       $playlist_id = (int)($data['playlist_id'] ?? 0);
@@ -888,6 +943,7 @@ if (isset($_GET['action'])) {
       break;
 
     case 'remove_from_playlist':
+      verify_csrf();
       if (!$user_id) { send_json(['status' => 'error', 'message' => 'Unauthorized'], 403); }
       $data = json_decode(file_get_contents('php://input'), true);
       $public_id = $data['playlist_public_id'] ?? '';
@@ -902,6 +958,7 @@ if (isset($_GET['action'])) {
       break;
 
     case 'update_playlist_order':
+      verify_csrf();
       if (!$user_id) { send_json(['status' => 'error', 'message' => 'Unauthorized'], 403); }
       $data = json_decode(file_get_contents('php://input'), true);
       $public_id = $data['playlist_public_id'] ?? '';
@@ -926,7 +983,6 @@ if (isset($_GET['action'])) {
       }
       break;
 
-    // Export Playlist as JSON
     case 'export_playlist':
       $public_id = $_GET['public_id'] ?? '';
       $stmt = $db->prepare("SELECT id, name FROM playlists WHERE public_id = ?");
@@ -945,7 +1001,7 @@ if (isset($_GET['action'])) {
       $songs = $stmt_songs->fetchAll();
 
       $exportData = [
-        'app' => 'PHP-Music-Lite',
+        'app' => 'PHPMusic Lite',
         'playlist_name' => $pl['name'],
         'exported_at' => date('c'),
         'songs' => $songs
@@ -955,8 +1011,8 @@ if (isset($_GET['action'])) {
       echo json_encode($exportData, JSON_PRETTY_PRINT | JSON_INVALID_UTF8_SUBSTITUTE);
       exit;
 
-    // Import Playlist from JSON
     case 'import_playlist':
+      verify_csrf();
       if (!$user_id) { send_json(['status' => 'error', 'message' => 'Unauthorized'], 403); }
       if (!isset($_FILES['file']) || $_FILES['file']['error'] !== UPLOAD_ERR_OK) {
         send_json(['status' => 'error', 'message' => 'No valid playlist file uploaded.'], 400);
@@ -1002,20 +1058,16 @@ if (isset($_GET['action'])) {
   exit;
 }
 
-// Fast Full Scan
 function perform_full_scan($db) {
   ini_set('memory_limit', '512M');
   header('Content-Type: text/plain; charset=utf-8');
   ob_implicit_flush();
 
-  echo "PHP-Music-Lite - Fast Scan\n==========================\n\n";
+  echo "PHPMusic Lite - Fast Scan\n=========================\n\n";
 
   if (!class_exists('getID3')) {
     die("FATAL: getID3 library not found in " . __DIR__ . "/getid3/\n");
   }
-
-  $stmt = $db->query("SELECT id FROM users WHERE email = 'musiclibrary@mail.com'");
-  $library_user_id = (int)$stmt->fetchColumn();
 
   $db_files = $db->query("SELECT file, last_modified FROM music")->fetchAll(PDO::FETCH_KEY_PAIR);
 
@@ -1081,7 +1133,7 @@ function perform_full_scan($db) {
     $webp_image = process_image_to_webp($raw_image, 300, 70);
 
     $insert_stmt->execute([
-      $library_user_id, $filePath, $title, $artist, $album,
+      null, $filePath, $title, $artist, $album,
       $year, $duration, $bitrate, $webp_image, $mtime
     ]);
 
@@ -1142,41 +1194,52 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
     $initialViewJS = "<script>window.initialView = {$initialViewJSON};</script>";
   }
 }
+
+header('Content-Type: text/html; charset=utf-8');
+header('Cache-Control: no-cache, no-store, must-revalidate');
+header('Pragma: no-cache');
+header('Expires: 0');
 ?>
 <!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PHP-Music-Lite</title>
-    <link rel="icon" type="image/svg+xml" href="?action=get_app_icon" />
+    <title>PHPMusic Lite</title>
+    <link rel="icon" type="image/svg+xml" href="?action=get_app_icon&v=<?= $appVersion ?>" />
     <meta name="theme-color" content="#121212"/>
+    <meta name="csrf-token" content="<?= htmlspecialchars($_SESSION['csrf_token'], ENT_QUOTES, 'UTF-8') ?>">
     <link rel="manifest" href="?pwa=manifest">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&display=swap" rel="stylesheet">
-    <?php echo $initialViewJS; ?>
+    <?= $initialViewJS ?>
     <style>
       :root {
         --ytm-bg: #030303;
         --ytm-surface: #121212;
-        --ytm-surface-2: #282828;
+        --ytm-surface-2: #242424;
         --ytm-primary-text: #ffffff;
         --ytm-secondary-text: #aaaaaa;
-        --ytm-accent: #ff0000;
+        --ytm-accent: #ff1953;
         --header-height-mobile: 64px;
+      }
+      *, *::before, *::after {
+        border-color: transparent !important;
       }
       html, body {
         height: 100dvh;
         min-height: 100dvh;
         margin: 0;
+        overflow-x: hidden;
       }
       body {
         background-color: var(--ytm-bg);
         color: var(--ytm-primary-text);
         font-family: 'Roboto', sans-serif;
+        overflow-x: hidden;
       }
       body.player-visible {
         padding-bottom: 120px;
@@ -1187,13 +1250,14 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         text-overflow: ellipsis !important;
       }
       ::-webkit-scrollbar { width: 8px; height: 8px; }
-      ::-webkit-scrollbar-track { background: var(--ytm-surface); }
-      ::-webkit-scrollbar-thumb { background: var(--ytm-surface-2); border-radius: 4px;}
-      ::-webkit-scrollbar-thumb:hover { background: #555; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: var(--ytm-surface-2); border-radius: 4px; }
+      ::-webkit-scrollbar-thumb:hover { background: #444; }
       .app-container {
         display: flex;
         height: 100dvh;
         min-height: 100dvh;
+        overflow-x: hidden;
       }
       .sidebar {
         width: 240px;
@@ -1207,10 +1271,17 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         display: flex;
         flex-direction: column;
         overflow-y: auto;
+        overflow-x: hidden;
+        min-width: 0;
       }
       .content-area-wrapper {
         padding: 1.5rem 2rem 5rem 2rem;
         flex-grow: 1;
+        overflow-x: hidden;
+      }
+      .content-area-wrapper .row {
+        margin-left: 0 !important;
+        margin-right: 0 !important;
       }
       body.player-visible .content-area-wrapper {
         padding-bottom: 140px;
@@ -1220,9 +1291,9 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         align-items: flex-end;
         gap: 1.5rem;
         margin-bottom: 2rem;
-        padding: 1rem;
+        padding: 1.5rem;
         background-color: var(--ytm-surface);
-        border-radius: 8px;
+        border-radius: 16px;
       }
       .view-details-header-info {
         min-width: 0;
@@ -1232,18 +1303,19 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         width: 150px;
         height: 150px;
         object-fit: cover;
-        border-radius: 6px;
+        border-radius: 12px;
         flex-shrink: 0;
         background-color: var(--ytm-surface-2);
       }
       .view-details-header-info .type {
-        font-size: 0.9rem;
+        font-size: 0.85rem;
         font-weight: 700;
         text-transform: uppercase;
         color: var(--ytm-secondary-text);
+        letter-spacing: 0.05em;
       }
       .view-details-header-info .name {
-        font-size: 2.5rem;
+        font-size: 2.25rem;
         font-weight: 700;
         margin: 0.5rem 0;
       }
@@ -1280,7 +1352,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         }
         .song-item {
           cursor: pointer;
-          border-radius: 0.5em;
+          border-radius: 8px;
         }
         .song-artist-mobile {
           display: none !important;
@@ -1288,13 +1360,27 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
       }
       .offcanvas-body .nav-link {
         padding: 0.75rem 1.5rem;
+        border-radius: 24px;
+        margin: 2px 12px;
       }
-      .sidebar .logo {
-        font-size: 1.5rem;
+      .sidebar .logo, .mobile-header .logo {
+        font-size: 1.4rem;
         font-weight: 700;
         padding: 0 1.5rem 1.5rem 1.5rem;
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        color: var(--ytm-primary-text);
       }
-      .sidebar .logo span {
+      .mobile-header .logo {
+        padding: 0;
+        font-size: 1.25rem;
+      }
+      .sidebar .logo svg, .mobile-header .logo svg {
+        flex-shrink: 0;
+        border-radius: 6px;
+      }
+      .sidebar .logo span, .mobile-header .logo span {
         color: var(--ytm-accent);
       }
       .nav-link {
@@ -1302,16 +1388,17 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         display: flex;
         align-items: center;
         font-weight: 500;
-        border-left: 3px solid transparent;
         gap: 1rem;
         text-decoration: none;
+        border: none !important;
+        transition: background-color 0.15s, color 0.15s;
       }
       .nav-link:hover, .nav-link.active {
-        background-color: var(--ytm-surface);
+        background-color: var(--ytm-surface-2);
         color: var(--ytm-primary-text);
       }
       .nav-link.active {
-        border-left-color: var(--ytm-accent);
+        color: #ffffff;
       }
       .nav-link .bi {
         font-size: 1.25rem;
@@ -1322,6 +1409,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         background-color: var(--ytm-bg);
         color: var(--ytm-primary-text);
         z-index: 999;
+        border: none !important;
       }
       .offcanvas .offcanvas-header {
         padding: 0.75rem 1.5rem;
@@ -1347,41 +1435,41 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
       #sort-select {
         background-color: var(--ytm-surface-2);
         color: var(--ytm-primary-text);
-        border: 1px solid #404040;
-        border-radius: 4px;
-        padding: 0.25rem 0.5rem;
+        border: none !important;
+        border-radius: 8px;
+        padding: 0.4rem 0.75rem;
+        outline: none;
       }
       .search-bar.input-group {
         width: auto;
-        min-width: 250px;
+        min-width: 0;
+        background-color: var(--ytm-surface-2);
+        border-radius: 50px;
+        overflow: hidden;
+      }
+      @media (min-width: 768px) {
+        .search-bar.input-group {
+          min-width: 250px;
+        }
       }
       .search-bar.input-group .form-control {
-        background-color: var(--ytm-surface-2);
-        border: 1px solid #404040;
-        border-right: none;
+        background-color: transparent !important;
+        border: none !important;
         color: var(--ytm-primary-text);
-        border-radius: 50px 0 0 50px;
         height: 40px;
         box-shadow: none;
-        padding-left: 1rem;
-      }
-      .search-bar.input-group .form-control:focus {
-        border-color: #666;
-        background-color: var(--ytm-surface-2);
-        color: var(--ytm-primary-text);
+        padding-left: 1.25rem;
       }
       .search-bar.input-group .form-control::placeholder {
         color: var(--ytm-secondary-text);
       }
       .search-bar.input-group .btn {
-        background-color: var(--ytm-surface-2);
-        border: 1px solid #404040;
+        background-color: transparent !important;
+        border: none !important;
         color: var(--ytm-secondary-text);
-        border-radius: 0 50px 50px 0;
         z-index: 5;
       }
       .search-bar.input-group .btn:hover {
-        background-color: #383838;
         color: var(--ytm-primary-text);
       }
       .content-title {
@@ -1394,9 +1482,10 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         grid-template-columns: 40px minmax(0, 4fr) minmax(0, 3fr) minmax(0, 3fr) 80px 40px;
         align-items: center;
         gap: 1rem;
-        padding: 0.5rem 1rem;
+        padding: 0.6rem 1rem;
         font-size: 0.9rem;
         color: var(--ytm-secondary-text);
+        border: none !important;
       }
       .song-list-header {
         font-weight: 500;
@@ -1415,7 +1504,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         width: 40px;
         height: 40px;
         object-fit: cover;
-        border-radius: 4px;
+        border-radius: 8px;
         background-color: var(--ytm-surface);
       }
       .song-item .song-more {
@@ -1424,24 +1513,34 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
       }
       .song-item .more-btn, .playlist-more-btn {
         background: none;
-        border: none;
+        border: none !important;
         color: var(--ytm-secondary-text);
         padding: 5px;
         cursor: pointer;
         border-radius: 50%;
       }
-      .song-item:hover .more-btn, .playlist-more-btn:hover {
+      .song-item:hover .more-btn,
+      .playlist-more-btn:hover {
         color: var(--ytm-primary-text);
       }
       .card.playlist-card {
         position: relative;
+        border: none !important;
+        background: transparent !important;
+      }
+      .card.playlist-card .card-img-top {
+        width: 100%;
+        aspect-ratio: 1 / 1;
+        object-fit: cover;
+        display: block;
+        border-radius: 0 !important;
       }
       .playlist-more-btn {
         position: absolute;
         top: 0.5rem;
         right: 0.5rem;
         background: transparent !important;
-        border: none;
+        border: none !important;
         padding: 0.25rem;
         font-size: 1.25rem;
         line-height: 1;
@@ -1451,14 +1550,15 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         display: none;
         position: fixed;
         background-color: var(--ytm-surface-2);
-        border-radius: 4px;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+        border-radius: 12px;
+        box-shadow: 0 8px 28px rgba(0,0,0,0.6);
         z-index: 1080;
         list-style: none;
         padding: 0.5rem 0;
         min-width: 220px;
         max-height: 50dvh;
         overflow-y: auto;
+        border: none !important;
       }
       .context-menu-item {
         padding: 0.75rem 1.25rem;
@@ -1467,9 +1567,10 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         display: flex;
         align-items: center;
         gap: 0.75rem;
+        font-size: 0.92rem;
       }
       .context-menu-item:hover {
-        background-color: #404040;
+        background-color: #383838;
       }
       .context-menu-item .bi {
         font-size: 1.1rem;
@@ -1480,8 +1581,8 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         left: 0;
         right: 0;
         height: 90px;
-        background-color: var(--ytm-bg);
-        border-top: 1px solid var(--ytm-surface-2);
+        background-color: var(--ytm-surface);
+        border: none !important;
         display: grid;
         grid-template-columns: minmax(180px, 1fr) minmax(260px, 3fr) minmax(180px, 1fr);
         align-items: center;
@@ -1499,7 +1600,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         width: 56px;
         height: 56px;
         object-fit: cover;
-        border-radius: 4px;
+        border-radius: 8px;
         flex-shrink: 0;
       }
       .player-bar .track-info-text {
@@ -1529,7 +1630,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
       }
       .player-btn {
         background: none;
-        border: none;
+        border: none !important;
         color: var(--ytm-secondary-text);
         padding: 0;
         display: flex;
@@ -1543,14 +1644,14 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
       }
       .player-btn.play-btn {
         color: var(--ytm-primary-text);
-        background-color: var(--ytm-surface);
-        width: 40px;
-        height: 40px;
+        background-color: var(--ytm-surface-2);
+        width: 44px;
+        height: 44px;
         border-radius: 50%;
         transition: transform 0.1s, background-color 0.2s;
       }
       .player-btn.play-btn:hover {
-        transform: scale(1.1);
+        transform: scale(1.08);
         background-color: #383838;
       }
       .player-btn .bi {
@@ -1585,7 +1686,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
       }
       .progress-bar-bg {
         height: 4px;
-        background-color: #404040;
+        background-color: var(--ytm-surface-2);
         border-radius: 2px;
         position: absolute;
         top: 5px;
@@ -1641,17 +1742,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         height: 4px;
         border-radius: 2px;
         background: var(--ytm-surface-2);
-      }
-      #volume-slider.form-range::-webkit-slider-runnable-track {
-        -webkit-appearance: none;
-        background: none;
-        border: none;
-        height: 4px;
-      }
-      #volume-slider.form-range::-moz-range-track {
-        background: none;
-        border: none;
-        height: 4px;
+        border: none !important;
       }
       #volume-slider.form-range::-webkit-slider-thumb {
         -webkit-appearance: none;
@@ -1675,46 +1766,46 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
       }
       .volume-control:hover #volume-slider.form-range::-webkit-slider-thumb { opacity: 1; }
       .volume-control:hover #volume-slider.form-range::-moz-range-thumb { opacity: 1; }
-      .volume-control:hover #volume-slider.form-range { --track-fill: var(--ytm-accent) !important; }
       .modal-content {
         background-color: var(--ytm-surface);
-        border: none;
-        border-radius: 1rem;
-      }
-      .modal-footer {
-        border-top: 1px solid var(--ytm-surface-2);
+        border: none !important;
+        border-radius: 20px;
       }
       .form-control, .form-select {
         background-color: var(--ytm-surface-2);
-        border: 1px solid #404040;
+        border: none !important;
         color: var(--ytm-primary-text);
+        border-radius: 10px;
       }
       .form-control:focus, .form-select:focus {
         background-color: var(--ytm-surface-2);
-        border-color: #666;
         color: var(--ytm-primary-text);
         box-shadow: none;
+        outline: none;
       }
       body.logged-out .logged-in-only { display: none !important; }
       body.logged-in .logged-out-only { display: none !important; }
       .song-item .playing-icon {
         display: none;
-        font-size: 1.5rem;
-        color: var(--ytm-accent);
+        width: 24px;
+        height: 24px;
       }
       .song-item.now-playing .song-thumb { display: none; }
       .song-item.now-playing .playing-icon {
         display: inline-block;
-        animation: soundwave-pulse 1.2s ease-in-out infinite;
       }
       .song-item.now-playing .song-title { color: var(--ytm-accent); }
-      @keyframes soundwave-pulse {
-        0% { transform: scaleY(0.4); }
-        25% { transform: scaleY(1); }
-        50% { transform: scaleY(0.6); }
-        75% { transform: scaleY(0.8); }
-        100% { transform: scaleY(0.4); }
+      @keyframes soundwave-bar {
+        0%, 100% { height: 16px; y: 42px; }
+        50% { height: 60px; y: 20px; }
       }
+      .soundwave-svg rect:nth-child(2) { animation: soundwave-bar 1.2s infinite ease-in-out 0.1s; }
+      .soundwave-svg rect:nth-child(3) { animation: soundwave-bar 1.2s infinite ease-in-out 0.4s; }
+      .soundwave-svg rect:nth-child(4) { animation: soundwave-bar 1.2s infinite ease-in-out 0.2s; }
+      .soundwave-svg rect:nth-child(5) { animation: soundwave-bar 1.2s infinite ease-in-out 0.5s; }
+      .soundwave-svg rect:nth-child(6) { animation: soundwave-bar 1.2s infinite ease-in-out 0.3s; }
+      .soundwave-svg rect:nth-child(7) { animation: soundwave-bar 1.2s infinite ease-in-out 0.6s; }
+
       @media (max-width: 767.98px) {
         body.player-visible { padding-bottom: 160px; }
         body.player-visible .content-area-wrapper { padding-bottom: 180px; }
@@ -1725,7 +1816,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           top: 0; left: 0; right: 0;
           height: var(--header-height-mobile);
           background-color: var(--ytm-bg);
-          border-bottom: 1px solid var(--ytm-surface-2);
+          border: none !important;
           z-index: 1000;
           display: flex;
           align-items: center;
@@ -1733,7 +1824,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           gap: 0.5rem;
         }
         .header-btn {
-          background: none; border: none; color: var(--ytm-primary-text);
+          background: none; border: none !important; color: var(--ytm-primary-text);
           font-size: 1.5rem; padding: 0.5rem;
         }
         .page-header { padding: 1rem 1rem 0 1rem; flex-wrap: wrap; }
@@ -1746,6 +1837,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           height: 150px;
           padding: 0.5rem 1rem;
           gap: 0;
+          background-color: var(--ytm-surface);
         }
         .player-bar .track-info.d-md-none {
           order: 1; width: 100%; cursor: pointer; justify-content: space-between;
@@ -1764,15 +1856,20 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         .player-btn.play-btn { width: 52px; height: 52px; }
         .player-btn .bi { font-size: 1.5rem; }
         .player-btn.play-btn .bi { font-size: 2.25rem; }
-        .song-list-header { display: none; }
+        
+        /* Mobile: completely borderless song list */
+        .song-list-header { display: none !important; }
+        .song-list { border: none !important; }
         .song-item {
           grid-template-columns: 40px minmax(0, 1fr) 36px;
           grid-template-rows: auto auto;
           align-items: center;
           gap: 0.45rem 0.95rem;
           padding: 0.55rem 0.5rem;
+          border: none !important;
+          border-bottom: none !important;
+          box-shadow: none !important;
         }
-        /* Mobile: explicitly hide desktop artist and album to avoid duplicates */
         .song-item .song-artist, .song-item .song-album, .song-item .song-duration {
           display: none !important;
         }
@@ -1799,6 +1896,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           color: var(--ytm-secondary-text);
           gap: 0.5rem;
           line-height: 1.25;
+          border: none !important;
         }
         .song-item .song-more {
           grid-column: 3;
@@ -1807,7 +1905,6 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           justify-self: end;
         }
         .view-details-header { flex-direction: column; align-items: center; text-align: center; }
-        .song-list-header, .song-item { border-bottom: 1px solid var(--ytm-surface-2); }
       }
       .loader {
         text-align: center;
@@ -1819,9 +1916,10 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         background-color: var(--ytm-bg);
         color: var(--ytm-primary-text);
         min-height: 100dvh;
+        border: none !important;
       }
       .player-modal-header {
-        border-bottom: 0;
+        border: none !important;
         justify-content: space-between;
         align-items: center;
       }
@@ -1848,8 +1946,8 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         max-width: 400px;
         aspect-ratio: 1/1;
         object-fit: cover;
-        border-radius: 12px;
-        box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+        border-radius: 16px;
+        box-shadow: 0 12px 32px rgba(0,0,0,0.6);
       }
       .player-modal-track-info {
         text-align: left;
@@ -1877,7 +1975,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
       .player-modal-controls .player-btn .bi { font-size: 2rem; }
       .player-modal-controls .play-btn { width: 70px; height: 70px; }
       .player-modal-controls .play-btn .bi { font-size: 3.5rem; }
-      .add-to-playlist-item { cursor: pointer; }
+      .add-to-playlist-item { cursor: pointer; border-radius: 10px; }
       .add-to-playlist-item:hover { background-color: var(--ytm-surface-2); }
     </style>
   </head>
@@ -1885,11 +1983,17 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
     <div class="app-container">
       <nav class="sidebar offcanvas-md offcanvas-start" tabindex="-1" id="main-nav-offcanvas">
         <div class="offcanvas-header">
-          <div class="logo">PHP<span>Music</span> Lite</div>
+          <div class="logo">
+            <svg width="24" height="24" viewBox="0 0 100 100"><rect width="100" height="100" rx="24" fill="#0d0d0d"/><rect x="13" y="38" width="7.5" height="24" rx="3.75" fill="#ffffff"/><rect x="27" y="25" width="7.5" height="50" rx="3.75" fill="#ff1953"/><rect x="41" y="13" width="7.5" height="74" rx="3.75" fill="#ffffff"/><rect x="55" y="25" width="7.5" height="50" rx="3.75" fill="#ffffff"/><rect x="69" y="38" width="7.5" height="24" rx="3.75" fill="#ffffff"/><rect x="83" y="25" width="7.5" height="50" rx="3.75" fill="#ffffff"/></svg>
+            PHPMusic <span>Lite</span>
+          </div>
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" data-bs-target="#main-nav-offcanvas" aria-label="Close"></button>
         </div>
         <div class="offcanvas-body d-flex flex-column">
-          <div class="logo d-none d-md-block">PHP<span>Music</span> <small class="text-danger fs-6">Lite</small></div>
+          <div class="logo d-none d-md-flex">
+            <svg width="28" height="28" viewBox="0 0 100 100"><rect width="100" height="100" rx="24" fill="#0d0d0d"/><rect x="13" y="38" width="7.5" height="24" rx="3.75" fill="#ffffff"/><rect x="27" y="25" width="7.5" height="50" rx="3.75" fill="#ff1953"/><rect x="41" y="13" width="7.5" height="74" rx="3.75" fill="#ffffff"/><rect x="55" y="25" width="7.5" height="50" rx="3.75" fill="#ffffff"/><rect x="69" y="38" width="7.5" height="24" rx="3.75" fill="#ffffff"/><rect x="83" y="25" width="7.5" height="50" rx="3.75" fill="#ffffff"/></svg>
+            PHPMusic <small class="text-danger fs-6">Lite</small>
+          </div>
           <a href="#" class="nav-link active" data-view="get_songs">
             <i class="bi bi-music-note-list"></i>
             <span class="text-truncate">All Songs</span>
@@ -1947,8 +2051,8 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           <button class="header-btn" type="button" data-bs-toggle="offcanvas" data-bs-target="#main-nav-offcanvas">
             <i class="bi bi-list"></i>
           </button>
-          <div class="input-group search-bar flex-grow-1">
-            <input type="text" class="form-control" id="search-input-mobile" placeholder="Search your music" aria-label="Search your music">
+          <div class="input-group search-bar flex-grow-1 ms-2">
+            <input type="text" class="form-control" id="search-input-mobile" placeholder="Search..." aria-label="Search">
             <button class="btn" type="button" id="search-btn-mobile"><i class="bi bi-search"></i></button>
           </div>
         </div>
@@ -2070,22 +2174,22 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
     <!-- Modals -->
     <div class="modal fade" id="login-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-          <div class="modal-header border-0">
+        <div class="modal-content p-2">
+          <div class="modal-header">
             <h5 class="modal-title">Login</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body">
             <form id="login-form">
               <div class="mb-3">
-                <label for="login-email" class="form-label">Email address</label>
+                <label for="login-email" class="form-label text-secondary small">Email address</label>
                 <input type="email" class="form-control" id="login-email" required>
               </div>
               <div class="mb-3">
-                <label for="login-password" class="form-label">Password</label>
+                <label for="login-password" class="form-label text-secondary small">Password</label>
                 <input type="password" class="form-control" id="login-password" required>
               </div>
-              <button type="submit" class="btn btn-danger w-100">Login</button>
+              <button type="submit" class="btn btn-danger w-100 rounded-pill mt-2">Login</button>
             </form>
           </div>
         </div>
@@ -2094,26 +2198,26 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
 
     <div class="modal fade" id="register-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-          <div class="modal-header border-0">
+        <div class="modal-content p-2">
+          <div class="modal-header">
             <h5 class="modal-title">Register</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body">
             <form id="register-form">
               <div class="mb-3">
-                <label for="register-artist" class="form-label">Artist/Display Name</label>
+                <label for="register-artist" class="form-label text-secondary small">Artist/Display Name</label>
                 <input type="text" class="form-control" id="register-artist" required>
               </div>
               <div class="mb-3">
-                <label for="register-email" class="form-label">Email address</label>
+                <label for="register-email" class="form-label text-secondary small">Email address</label>
                 <input type="email" class="form-control" id="register-email" required>
               </div>
               <div class="mb-3">
-                <label for="register-password" class="form-label">Password</label>
+                <label for="register-password" class="form-label text-secondary small">Password</label>
                 <input type="password" class="form-control" id="register-password" required minlength="6">
               </div>
-              <button type="submit" class="btn btn-danger w-100">Register</button>
+              <button type="submit" class="btn btn-danger w-100 rounded-pill mt-2">Register</button>
             </form>
           </div>
         </div>
@@ -2123,32 +2227,32 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
     <!-- Settings Modal -->
     <div class="modal fade" id="settings-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-          <div class="modal-header border-0">
+        <div class="modal-content p-2">
+          <div class="modal-header">
             <h5 class="modal-title"><i class="bi bi-sliders me-2"></i>Settings</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body">
-            <h6>Display Name</h6>
+            <h6 class="small text-secondary mb-2">Display Name</h6>
             <form id="change-name-form" class="mb-4">
               <div class="mb-3">
                 <input type="text" class="form-control" id="display-name-input" required placeholder="Display / Artist Name">
               </div>
-              <button type="submit" class="btn btn-danger w-100">Update Name</button>
+              <button type="submit" class="btn btn-danger w-100 rounded-pill">Update Name</button>
             </form>
 
-            <h6 class="mt-4">Change Password</h6>
+            <h6 class="small text-secondary mb-2">Change Password</h6>
             <form id="change-password-form" class="mb-4">
               <div class="mb-3">
                 <input type="password" class="form-control" id="new-password" required minlength="6" placeholder="New Password">
               </div>
-              <button type="submit" class="btn btn-danger w-100">Save Password</button>
+              <button type="submit" class="btn btn-danger w-100 rounded-pill">Save Password</button>
             </form>
 
-            <div class="mt-4 pt-3 border-top border-secondary">
-              <h6 class="text-danger">Delete Account</h6>
+            <div class="mt-4 pt-3">
+              <h6 class="text-danger small mb-1">Delete Account</h6>
               <p class="text-secondary small mb-3">Permanently remove your account and playlists.</p>
-              <button type="button" class="btn btn-outline-danger w-100" id="delete-account-btn">Delete My Account</button>
+              <button type="button" class="btn btn-outline-danger w-100 rounded-pill" id="delete-account-btn">Delete My Account</button>
             </div>
           </div>
         </div>
@@ -2157,18 +2261,18 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
 
     <div class="modal fade" id="create-playlist-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-          <div class="modal-header border-0">
+        <div class="modal-content p-2">
+          <div class="modal-header">
             <h5 class="modal-title">Create New Playlist</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body">
             <form id="create-playlist-form">
               <div class="mb-3">
-                <label for="playlist-name-input" class="form-label">Playlist Name</label>
+                <label for="playlist-name-input" class="form-label text-secondary small">Playlist Name</label>
                 <input type="text" class="form-control" id="playlist-name-input" required>
               </div>
-              <button type="submit" class="btn btn-danger w-100">Create</button>
+              <button type="submit" class="btn btn-danger w-100 rounded-pill mt-2">Create</button>
             </form>
           </div>
         </div>
@@ -2177,8 +2281,8 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
 
     <div class="modal fade" id="edit-playlist-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-          <div class="modal-header border-0">
+        <div class="modal-content p-2">
+          <div class="modal-header">
             <h5 class="modal-title">Edit Playlist</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
@@ -2186,10 +2290,10 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
             <form id="edit-playlist-form">
               <input type="hidden" id="edit-playlist-id-input">
               <div class="mb-3">
-                <label for="edit-playlist-name-input" class="form-label">Playlist Name</label>
+                <label for="edit-playlist-name-input" class="form-label text-secondary small">Playlist Name</label>
                 <input type="text" class="form-control" id="edit-playlist-name-input" required>
               </div>
-              <button type="submit" class="btn btn-danger w-100">Save Changes</button>
+              <button type="submit" class="btn btn-danger w-100 rounded-pill mt-2">Save Changes</button>
             </form>
           </div>
         </div>
@@ -2198,8 +2302,8 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
 
     <div class="modal fade" id="add-to-playlist-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered modal-dialog-scrollable">
-        <div class="modal-content">
-          <div class="modal-header border-0">
+        <div class="modal-content p-2">
+          <div class="modal-header">
             <h5 class="modal-title">Add to Playlist</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
@@ -2210,8 +2314,8 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
 
     <div class="modal fade" id="metadata-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-          <div class="modal-header border-0">
+        <div class="modal-content p-2">
+          <div class="modal-header">
             <h5 class="modal-title">Song Metadata</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
@@ -2222,14 +2326,14 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
 
     <div class="modal fade" id="share-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
-          <div class="modal-header border-0">
+        <div class="modal-content p-2">
+          <div class="modal-header">
             <h5 class="modal-title text-truncate" id="share-modal-title">Share</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body">
             <p class="text-secondary text-center mb-4" id="share-modal-text">Share this with your friends!</p>
-            <div class="input-group">
+            <div class="input-group search-bar">
               <input type="text" class="form-control" id="share-url-input" readonly>
               <button class="btn btn-danger" type="button" id="copy-share-url-btn">Copy</button>
             </div>
@@ -2240,13 +2344,13 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
 
     <div class="modal fade" id="full-scan-modal" tabindex="-1">
       <div class="modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable">
-        <div class="modal-content">
-          <div class="modal-header border-0">
+        <div class="modal-content p-2">
+          <div class="modal-header">
             <h5 class="modal-title">Full Library Scan Log</h5>
             <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
           </div>
           <div class="modal-body p-0">
-            <iframe id="full-scan-iframe" src="about:blank" style="width: 100%; height: 50dvh; border: none; background-color: #030303;"></iframe>
+            <iframe id="full-scan-iframe" src="about:blank" style="width: 100%; height: 50dvh; border: none; background-color: #030303; border-radius: 12px;"></iframe>
           </div>
         </div>
       </div>
@@ -2260,7 +2364,23 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
       document.addEventListener('DOMContentLoaded', () => {
         'use strict';
 
-        // Fast OPFS Cache
+        let csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || '';
+
+        const escapeHtml = str => {
+          if (!str) return '';
+          return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+        };
+
+        const escapeAttr = str => {
+          if (!str) return '';
+          return String(str).replace(/'/g, "&apos;").replace(/"/g, "&quot;");
+        };
+
         const opfs = {
           root: null,
           async init() {
@@ -2268,7 +2388,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
               try {
                 this.root = await navigator.storage.getDirectory();
               } catch (e) {
-                console.warn('OPFS init warning:', e);
+                console.warn('OPFS warning:', e);
               }
             }
           },
@@ -2382,6 +2502,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           volumeUp: '<i class="bi bi-volume-up-fill"></i>',
           volumeDown: '<i class="bi bi-volume-down-fill"></i>',
           volumeMute: '<i class="bi bi-volume-mute-fill"></i>',
+          soundwave: `<svg class="playing-icon soundwave-svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="24" fill="#0d0d0d"/><rect x="13" y="38" width="7.5" height="24" rx="3.75" fill="#ffffff"/><rect x="27" y="25" width="7.5" height="50" rx="3.75" fill="#ff1953"/><rect x="41" y="13" width="7.5" height="74" rx="3.75" fill="#ffffff"/><rect x="55" y="25" width="7.5" height="50" rx="3.75" fill="#ffffff"/><rect x="69" y="38" width="7.5" height="24" rx="3.75" fill="#ffffff"/><rect x="83" y="25" width="7.5" height="50" rx="3.75" fill="#ffffff"/></svg>`
         };
 
         const formatTime = seconds => {
@@ -2394,6 +2515,10 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         const fetchData = async (url, options = {}) => {
           try {
             options.cache = 'no-store';
+            options.headers = options.headers || {};
+            if (csrfToken) {
+              options.headers['X-CSRF-Token'] = csrfToken;
+            }
             const res = await fetch(url, options);
             if (!res.ok) {
               const err = await res.json().catch(() => null);
@@ -2414,11 +2539,11 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           container.className = 'toast-container position-fixed bottom-0 end-0 p-3';
           container.style.zIndex = "1100";
           const toastEl = document.createElement('div');
-          toastEl.className = `toast align-items-center text-white bg-${type === 'error' ? 'danger' : 'success'} border-0`;
+          toastEl.className = `toast align-items-center text-white bg-${type === 'error' ? 'danger' : 'secondary'} border-0 rounded-4`;
           toastEl.setAttribute('role', 'alert');
           toastEl.innerHTML = `
             <div class="d-flex">
-              <div class="toast-body text-truncate">${message}</div>
+              <div class="toast-body text-truncate">${escapeHtml(message)}</div>
               <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
             </div>`;
           document.body.appendChild(container);
@@ -2449,31 +2574,31 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           contentTitle.classList.remove('d-none');
           const decoded = decodeURIComponent(text.replace(/\+/g, ' '));
           contentTitle.textContent = decoded;
-          document.title = decoded + ' - PHP-Music-Lite';
+          document.title = decoded + ' - PHPMusic Lite';
         };
 
         const renderViewDetailsHeader = (details, type) => {
           let typeText = type.toUpperCase();
           let statsText = `${details.song_count || 0} songs &bull; ${formatTime(details.total_duration || 0)}`;
           let exportBtn = (type === 'playlist') ? `
-            <button class="btn btn-outline-light border-0 me-2" title="Export Playlist" onclick="window.location.href='?action=export_playlist&public_id=${details.public_id}'">
+            <button class="btn btn-outline-light rounded-pill me-2 px-3" title="Export Playlist" onclick="window.location.href='?action=export_playlist&public_id=${escapeAttr(details.public_id)}'">
               <i class="bi bi-box-arrow-up"></i> <span class="d-none d-md-inline">Export</span>
             </button>` : '';
           let shareBtn = `
-            <button class="btn btn-outline-light border-0 share-view-btn ms-auto" title="Share" data-share-id="${details.public_id || encodeURIComponent(details.name)}" data-share-name="${encodeURIComponent(details.name)}">
+            <button class="btn btn-outline-light rounded-pill share-view-btn ms-auto px-3" title="Share" data-share-id="${escapeAttr(details.public_id || encodeURIComponent(details.name))}" data-share-name="${escapeAttr(encodeURIComponent(details.name))}">
               <i class="bi bi-share-fill"></i> <span class="d-none d-md-inline">Share</span>
             </button>`;
 
           if (type === 'playlist') {
-            typeText = `PLAYLIST BY ${details.creator}`;
+            typeText = `PLAYLIST BY ${escapeHtml(details.creator)}`;
           }
 
           const headerHTML = `
             <div class="view-details-header">
-              <img src="${details.image_url}" alt="${details.name}">
+              <img src="${escapeAttr(details.image_url)}" alt="${escapeAttr(details.name)}">
               <div class="view-details-header-info text-truncate">
                 <div class="type text-truncate">${typeText}</div>
-                <h2 class="name text-truncate">${details.name}</h2>
+                <h2 class="name text-truncate">${escapeHtml(details.name)}</h2>
                 <div class="stats text-truncate">${statsText}</div>
               </div>
               <div class="d-flex align-items-center ms-auto">
@@ -2517,8 +2642,6 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
             contentArea.appendChild(songList);
           }
 
-          const escapeAttr = str => str ? String(str).replace(/'/g, "&apos;").replace(/"/g, "&quot;") : '';
-
           const songsHTML = songs.map(song => {
             const isNowPlaying = currentSong && currentSong.id === song.id;
             return `
@@ -2531,13 +2654,13 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
                 data-song-user-id="${song.user_id}">
                 <div class="song-indicator-wrapper d-flex align-items-center justify-content-center">
                   <img src="?action=get_image&id=${song.id}" class="song-thumb" loading="lazy" alt="art">
-                  <i class="bi bi-soundwave playing-icon"></i>
+                  ${ICONS.soundwave}
                 </div>
                 <div class="song-title-wrapper text-truncate">
-                  <div class="song-title text-truncate">${song.title}</div>
+                  <div class="song-title text-truncate">${escapeHtml(song.title)}</div>
                 </div>
-                <div class="song-artist text-truncate" data-artist="${encodeURIComponent(song.artist)}">${song.artist}</div>
-                <div class="song-album text-truncate" data-album="${encodeURIComponent(song.album)}">${song.album}</div>
+                <div class="song-artist text-truncate" data-artist="${escapeAttr(encodeURIComponent(song.artist))}">${escapeHtml(song.artist)}</div>
+                <div class="song-album text-truncate" data-album="${escapeAttr(encodeURIComponent(song.album))}">${escapeHtml(song.album)}</div>
                 <div class="song-duration d-none d-md-block">${formatTime(song.duration)}</div>
                 <div class="song-more">
                   <button class="more-btn" data-song-id="${song.id}">
@@ -2545,7 +2668,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
                   </button>
                 </div>
                 <div class="song-artist-mobile d-md-none text-truncate">
-                  <span class="text-truncate me-2">${song.artist}</span>
+                  <span class="text-truncate me-2">${escapeHtml(song.artist)}</span>
                   <span>${formatTime(song.duration)}</span>
                 </div>
               </div>`;
@@ -2582,8 +2705,8 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           if (type === 'get_user_playlists' && !append) {
             contentArea.innerHTML = `
               <div class="p-3 d-flex gap-2">
-                <button class="btn btn-danger" id="create-new-playlist-btn"><i class="bi bi-plus-lg"></i> Create New Playlist</button>
-                <button class="btn btn-outline-light" id="import-playlist-btn"><i class="bi bi-box-arrow-in-down"></i> Import Playlist</button>
+                <button class="btn btn-danger rounded-pill px-3" id="create-new-playlist-btn"><i class="bi bi-plus-lg"></i> Create New Playlist</button>
+                <button class="btn btn-outline-light rounded-pill px-3" id="import-playlist-btn"><i class="bi bi-box-arrow-in-down"></i> Import Playlist</button>
               </div>`;
           }
 
@@ -2628,21 +2751,24 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
             }
 
             const moreBtn = (type === 'get_user_playlists') ? `
-              <button class="playlist-more-btn" data-public-id="${item.public_id}" data-name="${name}">
+              <button class="playlist-more-btn" data-public-id="${escapeAttr(item.public_id)}" data-name="${escapeAttr(name)}">
                 <i class="bi bi-three-dots-vertical"></i>
               </button>` : '';
 
             return `
               <div class="col">
-                <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${encodeURIComponent(dataVal)}" style="cursor: pointer;">
+                <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${escapeAttr(encodeURIComponent(dataVal))}" style="cursor: pointer;">
                   ${moreBtn}
-                  <img src="?action=get_image&id=${imageId}" class="card-img-top ${isRound ? 'rounded-circle' : 'rounded'}" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);" loading="lazy">
+                  <div style="position: relative; display: block; border-radius: ${isRound ? '50%' : '8px'}; overflow: hidden;">
+                    <img src="?action=get_image&id=${imageId}" class="card-img-top" alt="${escapeAttr(name)}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2); margin-bottom: 0 !important;" loading="lazy">
+                  </div>
                   <div class="card-body px-0 py-2">
-                    <h5 class="card-title fs-6 fw-normal text-truncate">${name}</h5>
-                    ${subtext ? `<p class="card-text small text-secondary text-truncate">${subtext}</p>` : ''}
+                    <h5 class="card-title fs-6 fw-normal text-truncate">${escapeHtml(name)}</h5>
+                    ${subtext ? `<p class="card-text small text-secondary text-truncate">${escapeHtml(subtext)}</p>` : ''}
                   </div>
                 </div>
-              </div>`;
+              </div>
+            `;
           }).join('');
 
           grid.insertAdjacentHTML('beforeend', itemsHTML);
@@ -2722,7 +2848,29 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           if (active) active.classList.add('active');
         };
 
-        const loadView = async viewConfig => {
+        // Navigation History & Page Persistence
+        const saveViewState = viewConfig => {
+          try {
+            localStorage.setItem('phpmusic_lite_last_view', JSON.stringify(viewConfig));
+          } catch (e) {}
+        };
+
+        const parseViewFromHash = () => {
+          if (!window.location.hash || window.location.hash.length <= 1) return null;
+          const hashStr = window.location.hash.substring(1);
+          const params = new URLSearchParams(hashStr);
+          const type = params.get('view');
+          if (type) {
+            return {
+              type: type,
+              param: decodeURIComponent(params.get('param') || ''),
+              sort: decodeURIComponent(params.get('sort') || 'title_asc')
+            };
+          }
+          return null;
+        };
+
+        const loadView = async (viewConfig, pushToHistory = true) => {
           mainContent.scrollTop = 0;
           currentPage = 1;
           allContentloaded = false;
@@ -2730,6 +2878,13 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           showLoader();
 
           currentView = viewConfig;
+
+          if (pushToHistory) {
+            const hash = `view=${encodeURIComponent(currentView.type)}&param=${encodeURIComponent(currentView.param || '')}&sort=${encodeURIComponent(currentView.sort || '')}`;
+            window.history.pushState(currentView, '', `#${hash}`);
+          }
+          saveViewState(currentView);
+
           updateActiveNavLink(currentView.type);
           setupSortOptions(currentView.type);
 
@@ -2793,7 +2948,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
               const el = contentArea.querySelector(`.song-item[data-song-id="${viewConfig.highlight}"]`);
               if (el) {
                 el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                el.style.backgroundColor = 'rgba(255, 0, 0, 0.2)';
+                el.style.backgroundColor = 'rgba(255, 25, 83, 0.2)';
                 setTimeout(() => el.style.backgroundColor = '', 2000);
               }
             }, 300);
@@ -2801,12 +2956,25 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           hideLoader();
         };
 
+        // Browser Back & Forth Button Support
+        window.addEventListener('popstate', event => {
+          if (event.state && event.state.type) {
+            loadView(event.state, false);
+          } else {
+            const parsed = parseViewFromHash();
+            if (parsed) {
+              loadView(parsed, false);
+            } else {
+              loadView({ type: 'get_songs', param: '', sort: 'title_asc' }, false);
+            }
+          }
+        });
+
         const playSongById = async songId => {
           const song = await fetchData(`?action=get_song_data&id=${songId}`);
           if (!song) return;
           currentSong = song;
 
-          // Check OPFS cache
           const cachedBlob = await opfs.getBlob(`song_${song.id}.audio`);
           if (cachedBlob) {
             audio.src = URL.createObjectURL(cachedBlob);
@@ -2939,9 +3107,9 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           contextMenuItemEl = btn;
           const { id, title, artist, album, is_favorite } = data;
           let items = `
-            <li class="context-menu-item text-truncate" data-action="share_song" data-id="${id}" data-name="${encodeURIComponent(title)}"><i class="bi bi-share-fill"></i> Share</li>
-            <li class="context-menu-item text-truncate" data-action="go_artist" data-name="${encodeURIComponent(artist)}"><i class="bi bi-person-fill"></i> Go to Artist</li>
-            <li class="context-menu-item text-truncate" data-action="go_album" data-name="${encodeURIComponent(album)}"><i class="bi bi-disc-fill"></i> Go to Album</li>
+            <li class="context-menu-item text-truncate" data-action="share_song" data-id="${id}" data-name="${escapeAttr(encodeURIComponent(title))}"><i class="bi bi-share-fill"></i> Share</li>
+            <li class="context-menu-item text-truncate" data-action="go_artist" data-name="${escapeAttr(encodeURIComponent(artist))}"><i class="bi bi-person-fill"></i> Go to Artist</li>
+            <li class="context-menu-item text-truncate" data-action="go_album" data-name="${escapeAttr(encodeURIComponent(album))}"><i class="bi bi-disc-fill"></i> Go to Album</li>
             <li class="context-menu-item text-truncate" data-action="download_song" data-id="${id}"><i class="bi bi-download"></i> Download</li>
             <li class="context-menu-item text-truncate" data-action="show_metadata" data-id="${id}"><i class="bi bi-info-circle"></i> Info</li>`;
 
@@ -3049,7 +3217,6 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           }
         };
 
-        // Navigation
         allNavLinks.forEach(link => {
           if (link.getAttribute('data-bs-toggle') === 'modal' || link.id === 'sidebar-logout-btn') return;
           link.addEventListener('click', e => {
@@ -3059,7 +3226,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
             if (viewType === 'get_favorites' || viewType === 'get_user_playlists') sort = 'manual_order';
             if (viewType === 'get_albums') sort = 'album_asc';
             if (viewType === 'get_artists') sort = 'name_asc';
-            loadView({ type: viewType, param: '', sort });
+            loadView({ type: viewType, param: '', sort }, true);
 
             const offcanvasEl = document.getElementById('main-nav-offcanvas');
             if (window.innerWidth < 768 && offcanvasEl) {
@@ -3069,9 +3236,8 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           });
         });
 
-        // Search Handlers
         const runSearch = q => {
-          if (q.trim()) loadView({ type: 'search', param: q.trim(), sort: 'title_asc' });
+          if (q.trim()) loadView({ type: 'search', param: q.trim(), sort: 'title_asc' }, true);
         };
         searchInputDesktop.addEventListener('keyup', e => { if (e.key === 'Enter') runSearch(e.target.value); });
         searchInputMobile.addEventListener('keyup', e => { if (e.key === 'Enter') runSearch(e.target.value); });
@@ -3079,10 +3245,9 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         searchBtnMobile.addEventListener('click', () => runSearch(searchInputMobile.value));
 
         sortSelect.addEventListener('change', e => {
-          loadView({ ...currentView, sort: e.target.value });
+          loadView({ ...currentView, sort: e.target.value }, true);
         });
 
-        // Player Controls Listeners
         playerElements.playPauseBtn.forEach(btn => btn?.addEventListener('click', togglePlayPause));
         playerElements.prevBtn.forEach(btn => btn?.addEventListener('click', playPrev));
         playerElements.nextBtn.forEach(btn => btn?.addEventListener('click', playNext));
@@ -3122,7 +3287,6 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           playerElements.volumeBtn.innerHTML = isMuted ? ICONS.volumeMute : (audio.volume < 0.5 ? ICONS.volumeDown : ICONS.volumeUp);
         });
 
-        // Audio Progress
         audio.addEventListener('timeupdate', () => {
           if (!isFinite(audio.duration)) return;
           const progress = (audio.currentTime / audio.duration) * 100;
@@ -3140,7 +3304,6 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           });
         });
 
-        // Content Area Click Handlers
         contentArea.addEventListener('click', e => {
           const target = e.target;
           const moreBtn = target.closest('.more-btn');
@@ -3163,9 +3326,9 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
             contextMenuItemEl = plMoreBtn;
             const { publicId, name } = plMoreBtn.dataset;
             contextMenu.innerHTML = `
-              <li class="context-menu-item text-truncate" data-action="edit_playlist" data-public-id="${publicId}" data-name="${name}"><i class="bi bi-pencil"></i> Edit</li>
-              <li class="context-menu-item text-truncate" data-action="export_playlist" data-public-id="${publicId}"><i class="bi bi-box-arrow-up"></i> Export</li>
-              <li class="context-menu-item text-danger text-truncate" data-action="delete_playlist" data-public-id="${publicId}"><i class="bi bi-trash"></i> Delete</li>
+              <li class="context-menu-item text-truncate" data-action="edit_playlist" data-public-id="${escapeAttr(publicId)}" data-name="${escapeAttr(name)}"><i class="bi bi-pencil"></i> Edit</li>
+              <li class="context-menu-item text-truncate" data-action="export_playlist" data-public-id="${escapeAttr(publicId)}"><i class="bi bi-box-arrow-up"></i> Export</li>
+              <li class="context-menu-item text-danger text-truncate" data-action="delete_playlist" data-public-id="${escapeAttr(publicId)}"><i class="bi bi-trash"></i> Delete</li>
               <li class="context-menu-item" data-action="close_menu"><i class="bi bi-x-lg"></i> Close</li>`;
             contextMenu.style.display = 'block';
             positionContextMenu(plMoreBtn);
@@ -3195,25 +3358,25 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           const artistClick = target.closest('.song-artist');
           if (artistClick) {
             e.stopPropagation();
-            loadView({ type: 'artist_songs', param: artistClick.dataset.artist, sort: 'title_asc' });
+            loadView({ type: 'artist_songs', param: artistClick.dataset.artist, sort: 'title_asc' }, true);
             return;
           }
 
           const albumClick = target.closest('.song-album');
           if (albumClick) {
             e.stopPropagation();
-            loadView({ type: 'album_songs', param: albumClick.dataset.album, sort: 'title_asc' });
+            loadView({ type: 'album_songs', param: albumClick.dataset.album, sort: 'title_asc' }, true);
             return;
           }
 
           const card = target.closest('.card');
           if (card && !target.closest('.playlist-more-btn')) {
             if (card.dataset.artist) {
-              loadView({ type: 'artist_songs', param: card.dataset.artist, sort: 'title_asc' });
+              loadView({ type: 'artist_songs', param: card.dataset.artist, sort: 'title_asc' }, true);
             } else if (card.dataset.album) {
-              loadView({ type: 'album_songs', param: card.dataset.album, sort: 'title_asc' });
+              loadView({ type: 'album_songs', param: card.dataset.album, sort: 'title_asc' }, true);
             } else if (card.dataset.playlist) {
-              loadView({ type: 'playlist_songs', param: card.dataset.playlist, sort: 'manual_order' });
+              loadView({ type: 'playlist_songs', param: card.dataset.playlist, sort: 'manual_order' }, true);
             }
             return;
           }
@@ -3224,7 +3387,6 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           }
         });
 
-        // Context Menu Handler
         document.addEventListener('click', e => {
           if (contextMenu.style.display === 'block' && !contextMenu.contains(e.target)) {
             contextMenu.style.display = 'none';
@@ -3242,10 +3404,10 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
               showShareModal('song', id, name);
               break;
             case 'go_artist':
-              loadView({ type: 'artist_songs', param: name, sort: 'title_asc' });
+              loadView({ type: 'artist_songs', param: name, sort: 'title_asc' }, true);
               break;
             case 'go_album':
-              loadView({ type: 'album_songs', param: name, sort: 'title_asc' });
+              loadView({ type: 'album_songs', param: name, sort: 'title_asc' }, true);
               break;
             case 'toggle_favorite':
               toggleFavorite(parseInt(id));
@@ -3261,12 +3423,12 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
               if (meta) {
                 metadataModalBody.innerHTML = `
                   <ul class="list-group list-group-flush">
-                    <li class="list-group-item bg-transparent text-white border-secondary d-flex justify-content-between text-truncate"><span>Title:</span> <strong class="text-truncate">${meta.title}</strong></li>
-                    <li class="list-group-item bg-transparent text-white border-secondary d-flex justify-content-between text-truncate"><span>Artist:</span> <strong class="text-truncate">${meta.artist}</strong></li>
-                    <li class="list-group-item bg-transparent text-white border-secondary d-flex justify-content-between text-truncate"><span>Album:</span> <strong class="text-truncate">${meta.album}</strong></li>
-                    <li class="list-group-item bg-transparent text-white border-secondary d-flex justify-content-between"><span>Year:</span> <strong>${meta.year || 'N/A'}</strong></li>
-                    <li class="list-group-item bg-transparent text-white border-secondary d-flex justify-content-between"><span>Duration:</span> <strong>${formatTime(meta.duration)}</strong></li>
-                    <li class="list-group-item bg-transparent text-white border-secondary d-flex justify-content-between"><span>Bitrate:</span> <strong>${meta.bitrate ? Math.round(meta.bitrate / 1000) + ' kbps' : 'N/A'}</strong></li>
+                    <li class="list-group-item bg-transparent text-white d-flex justify-content-between text-truncate"><span>Title:</span> <strong class="text-truncate">${escapeHtml(meta.title)}</strong></li>
+                    <li class="list-group-item bg-transparent text-white d-flex justify-content-between text-truncate"><span>Artist:</span> <strong class="text-truncate">${escapeHtml(meta.artist)}</strong></li>
+                    <li class="list-group-item bg-transparent text-white d-flex justify-content-between text-truncate"><span>Album:</span> <strong class="text-truncate">${escapeHtml(meta.album)}</strong></li>
+                    <li class="list-group-item bg-transparent text-white d-flex justify-content-between"><span>Year:</span> <strong>${meta.year || 'N/A'}</strong></li>
+                    <li class="list-group-item bg-transparent text-white d-flex justify-content-between"><span>Duration:</span> <strong>${formatTime(meta.duration)}</strong></li>
+                    <li class="list-group-item bg-transparent text-white d-flex justify-content-between"><span>Bitrate:</span> <strong>${meta.bitrate ? Math.round(meta.bitrate / 1000) + ' kbps' : 'N/A'}</strong></li>
                   </ul>`;
                 metadataModal.show();
               }
@@ -3278,7 +3440,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
               const playlists = await fetchData('?action=get_user_playlists');
               if (playlists && playlists.length > 0) {
                 addToPlaylistModalBody.innerHTML = playlists.map(p =>
-                  `<button class="list-group-item list-group-item-action bg-transparent text-white border-secondary text-truncate my-1 p-2 rounded add-to-playlist-item" data-playlist-id="${p.id}">${p.name}</button>`
+                  `<button class="list-group-item list-group-item-action bg-transparent text-white text-truncate my-1 p-2 rounded add-to-playlist-item" data-playlist-id="${p.id}">${escapeHtml(p.name)}</button>`
                 ).join('');
               } else {
                 addToPlaylistModalBody.innerHTML = '<p class="text-secondary text-center mb-0">No playlists found. Create one first!</p>';
@@ -3292,7 +3454,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
               });
               if (removed && removed.status === 'success') {
                 showToast('Removed from playlist', 'success');
-                loadView(currentView);
+                loadView(currentView, false);
               }
               break;
             case 'edit_playlist':
@@ -3309,14 +3471,13 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
                 });
                 if (del && del.status === 'success') {
                   showToast('Playlist deleted', 'success');
-                  loadView(currentView);
+                  loadView(currentView, false);
                 }
               }
               break;
           }
         });
 
-        // Add to Playlist Selection
         addToPlaylistModalBody.addEventListener('click', async e => {
           const item = e.target.closest('.add-to-playlist-item');
           if (!item || !songIdForPlaylist || isAddingToPlaylist) return;
@@ -3339,7 +3500,6 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           }
         });
 
-        // Import Playlist
         playlistImportInput.addEventListener('change', async e => {
           const file = e.target.files[0];
           if (!file) return;
@@ -3351,19 +3511,17 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           });
           if (res && res.status === 'success') {
             showToast(res.message, 'success');
-            loadView({ type: 'get_user_playlists', param: '', sort: 'name_asc' });
+            loadView({ type: 'get_user_playlists', param: '', sort: 'name_asc' }, true);
           }
           playlistImportInput.value = '';
         });
 
-        // Infinite Scroll
         mainContent.addEventListener('scroll', () => {
           if (mainContent.scrollTop + mainContent.clientHeight >= mainContent.scrollHeight - 300) {
             loadMoreContent();
           }
         });
 
-        // Forms and Authentication
         document.getElementById('login-form').addEventListener('submit', async e => {
           e.preventDefault();
           const email = document.getElementById('login-email').value;
@@ -3374,11 +3532,12 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
             body: JSON.stringify({ email, password })
           });
           if (res && res.status === 'success') {
+            csrfToken = res.csrf_token || csrfToken;
             bootstrap.Modal.getInstance(document.getElementById('login-modal')).hide();
             e.target.reset();
             showToast('Logged in successfully', 'success');
             await checkSession();
-            loadView(currentView);
+            loadView(currentView, false);
           }
         });
 
@@ -3401,13 +3560,12 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
 
         document.getElementById('sidebar-logout-btn').addEventListener('click', async e => {
           e.preventDefault();
-          await fetchData('?action=logout');
+          await fetchData('?action=logout', { method: 'POST' });
           currentUser = null;
           updateUIForAuthState();
-          loadView({ type: 'get_songs', param: '', sort: 'title_asc' });
+          loadView({ type: 'get_songs', param: '', sort: 'title_asc' }, true);
         });
 
-        // Change Display Name
         document.getElementById('change-name-form').addEventListener('submit', async e => {
           e.preventDefault();
           const artist = document.getElementById('display-name-input').value;
@@ -3422,7 +3580,6 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           }
         });
 
-        // Change Password
         document.getElementById('change-password-form').addEventListener('submit', async e => {
           e.preventDefault();
           const new_password = document.getElementById('new-password').value;
@@ -3437,7 +3594,6 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           }
         });
 
-        // Delete Account
         document.getElementById('delete-account-btn').addEventListener('click', async () => {
           if (confirm('Are you sure you want to delete your account? This action cannot be undone.')) {
             const res = await fetchData('?action=delete_account', { method: 'POST' });
@@ -3446,7 +3602,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
               currentUser = null;
               updateUIForAuthState();
               showToast(res.message, 'success');
-              loadView({ type: 'get_songs', param: '', sort: 'title_asc' });
+              loadView({ type: 'get_songs', param: '', sort: 'title_asc' }, true);
             }
           }
         });
@@ -3463,7 +3619,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
             createPlaylistModal.hide();
             e.target.reset();
             showToast('Playlist created', 'success');
-            if (currentView.type === 'get_user_playlists') loadView(currentView);
+            if (currentView.type === 'get_user_playlists') loadView(currentView, false);
           }
         });
 
@@ -3479,7 +3635,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           if (res && res.status === 'success') {
             editPlaylistModal.hide();
             showToast('Playlist updated', 'success');
-            if (currentView.type === 'get_user_playlists') loadView(currentView);
+            if (currentView.type === 'get_user_playlists') loadView(currentView, false);
           }
         });
 
@@ -3494,7 +3650,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           fullScanModalEl.addEventListener('show.bs.modal', () => fullScanIframe.src = '?action=full_scan');
           fullScanModalEl.addEventListener('hidden.bs.modal', () => {
             fullScanIframe.src = 'about:blank';
-            loadView(currentView);
+            loadView(currentView, false);
           });
         }
 
@@ -3525,12 +3681,17 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         async function checkSession() {
           const res = await fetchData('?action=get_session');
           currentUser = (res && res.status === 'loggedin') ? res.user : null;
+          if (res && res.csrf_token) {
+            csrfToken = res.csrf_token;
+          }
           updateUIForAuthState();
         }
 
         const init = async () => {
           if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('?pwa=sw').catch(() => {});
+            navigator.serviceWorker.register('?pwa=sw').then(reg => {
+              reg.update();
+            }).catch(() => {});
           }
           playerElements.prevBtn.forEach(b => { if (b) b.innerHTML = ICONS.prev; });
           playerElements.nextBtn.forEach(b => { if (b) b.innerHTML = ICONS.next; });
@@ -3540,11 +3701,35 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           updateShuffleButtons();
 
           await checkSession();
+
+          // Persistent Page Recovery (Hash -> LocalStorage -> Default)
+          let initialToLoad = null;
           if (window.initialView) {
-            loadView(window.initialView);
+            initialToLoad = window.initialView;
           } else {
-            loadView({ type: 'get_songs', param: '', sort: 'title_asc' });
+            const hashView = parseViewFromHash();
+            if (hashView) {
+              initialToLoad = hashView;
+            } else {
+              try {
+                const saved = localStorage.getItem('phpmusic_lite_last_view');
+                if (saved) {
+                  const parsed = JSON.parse(saved);
+                  if (parsed && parsed.type) {
+                    initialToLoad = parsed;
+                  }
+                }
+              } catch (e) {}
+            }
           }
+
+          if (!initialToLoad) {
+            initialToLoad = { type: 'get_songs', param: '', sort: 'title_asc' };
+          }
+
+          const initialHash = `view=${encodeURIComponent(initialToLoad.type)}&param=${encodeURIComponent(initialToLoad.param || '')}&sort=${encodeURIComponent(initialToLoad.sort || '')}`;
+          window.history.replaceState(initialToLoad, '', `#${initialHash}`);
+          loadView(initialToLoad, false);
         };
 
         init();
