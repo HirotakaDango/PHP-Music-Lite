@@ -1,6 +1,6 @@
 # PHP-Music Lite
 
-<img width="1280" height="720" alt="1790888202712463711916972440333" src="https://github.com/user-attachments/assets/3707cddd-aa71-4773-8776-7b1cd5d2f71b" />
+<img width="1280" height="720" alt="image" src="https://github.com/user-attachments/assets/15fa5561-43d3-45d8-b10b-2ed67672a646" />
 
 **PHP-Music Lite** is a fast, ultra-lightweight, single-file music streaming server and web player. Inspired by the YouTube Music interface, it serves as the zero-dependency, portable alternative to [HirotakaDango/PHP-Music](https://github.com/HirotakaDango/PHP-Music).
 
