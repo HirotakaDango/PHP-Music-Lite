@@ -2440,6 +2440,10 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         let previousVolume = 1;
         let deferredInstallPrompt = null;
         let isAddingToPlaylist = false;
+        let currentPlayRequestId = 0;
+        let currentObjectUrl = null;
+        let cacheAbortController = null;
+        let currentPlayingListener = null;
 
         const PAGE_SIZE = 25;
         let currentPage = 1;
@@ -2908,21 +2912,58 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         });
 
         const playSongById = async songId => {
+          const requestId = ++currentPlayRequestId;
+
+          if (cacheAbortController) {
+            cacheAbortController.abort();
+            cacheAbortController = null;
+          }
+          if (currentPlayingListener) {
+            audio.removeEventListener('playing', currentPlayingListener);
+            currentPlayingListener = null;
+          }
+
           const song = await fetchData(`?action=get_song_data&id=${songId}`);
-          if (!song) return;
+          if (requestId !== currentPlayRequestId || !song) return;
+
+          const targetSongId = song.id;
+          const streamUrl = song.stream_url;
+
+          const cachedBlob = await opfs.getBlob(`song_${targetSongId}.audio`);
+          if (requestId !== currentPlayRequestId) return;
+
+          if (currentObjectUrl) {
+            URL.revokeObjectURL(currentObjectUrl);
+            currentObjectUrl = null;
+          }
+
           currentSong = song;
 
-          const cachedBlob = await opfs.getBlob(`song_${song.id}.audio`);
           if (cachedBlob) {
-            audio.src = URL.createObjectURL(cachedBlob);
+            currentObjectUrl = URL.createObjectURL(cachedBlob);
+            audio.src = currentObjectUrl;
           } else {
-            audio.src = currentSong.stream_url;
-            audio.addEventListener('playing', () => {
-              fetch(currentSong.stream_url)
+            audio.src = streamUrl;
+            const controller = new AbortController();
+            cacheAbortController = controller;
+
+            const onPlaying = () => {
+              audio.removeEventListener('playing', onPlaying);
+              if (currentPlayingListener === onPlaying) currentPlayingListener = null;
+              if (requestId !== currentPlayRequestId) return;
+
+              fetch(streamUrl, { signal: controller.signal })
                 .then(r => r.ok ? r.blob() : null)
-                .then(blob => { if (blob) opfs.saveBlob(`song_${song.id}.audio`, blob); })
+                .then(blob => {
+                  if (blob && requestId === currentPlayRequestId) {
+                    opfs.saveBlob(`song_${targetSongId}.audio`, blob);
+                  }
+                })
                 .catch(() => {});
-            }, { once: true });
+            };
+
+            currentPlayingListener = onPlaying;
+            audio.addEventListener('playing', onPlaying);
           }
 
           audio.load();
