@@ -69,7 +69,7 @@ if (isset($_GET['pwa'])) {
 
     self.addEventListener('fetch', event => {
       const url = new URL(event.request.url);
-      if (url.searchParams.has('action') || url.searchParams.has('share_type') || url.searchParams.has('view') || url.searchParams.has('pwa')) {
+      if (url.searchParams.has('action') || url.searchParams.has('share_type') || url.searchParams.has('view') || url.searchParams.has('search') || url.searchParams.has('pwa')) {
         event.respondWith(fetch(event.request));
         return;
       }
@@ -2800,7 +2800,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
           if (!active) {
             if (viewType === 'artist_songs') active = document.querySelector('.nav-link[data-view="get_artists"]');
             if (viewType === 'album_songs') active = document.querySelector('.nav-link[data-view="get_albums"]');
-            if (viewType === 'playlist_songs') active = document.querySelector('.nav-link[data-view="get_user_playlists"]');
+            if (viewType === 'playlist_songs' || viewType === 'get_playlists') active = document.querySelector('.nav-link[data-view="get_user_playlists"]');
           }
           if (active) active.classList.add('active');
         };
@@ -2847,6 +2847,8 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
               renderGrid(data, 'get_artists', false);
               break;
             case 'get_user_playlists':
+            case 'get_playlists':
+              currentView.type = 'get_user_playlists';
               updateContentTitle('Playlists');
               data = await fetchData(`?action=get_user_playlists&${params.toString()}`);
               renderGrid(data, 'get_user_playlists', false);
@@ -2862,6 +2864,9 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
                 renderViewDetailsHeader(viewData.details, type);
                 renderSongs(viewData.songs, false);
                 data = viewData.songs;
+              } else {
+                contentArea.innerHTML = '<div class="text-center p-5 text-secondary">Content not found.</div>';
+                allContentloaded = true;
               }
               break;
             case 'search':
@@ -2869,6 +2874,12 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
               params.delete('sort');
               params.append('q', currentView.param);
               data = await fetchData(`?action=search&${params.toString()}`);
+              renderSongs(data, false);
+              break;
+            default:
+              currentView = { type: 'get_songs', param: '', sort: 'title_asc' };
+              updateContentTitle('All Songs');
+              data = await fetchData(`?action=get_songs&sort=title_asc&page=1`);
               renderSongs(data, false);
               break;
           }
@@ -3657,21 +3668,39 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
             const urlParams = new URLSearchParams(window.location.search);
             const viewParam = urlParams.get('view');
             const searchParam = urlParams.get('search');
+            const shareType = urlParams.get('share_type');
+            const shareId = urlParams.get('id');
+
             if (viewParam) {
-              const sort = (viewParam === 'albums') ? 'album_asc' : (viewParam === 'artists') ? 'name_asc' : 'title_asc';
-              const type = viewParam.startsWith('get_') ? viewParam : 'get_' + viewParam;
+              let type = viewParam.startsWith('get_') ? viewParam : 'get_' + viewParam;
+              if (viewParam === 'playlists' || type === 'get_playlists') {
+                type = 'get_user_playlists';
+              }
+              let sort = 'title_asc';
+              if (type === 'get_albums') sort = 'album_asc';
+              else if (type === 'get_artists') sort = 'name_asc';
+              else if (type === 'get_favorites') sort = 'manual_order';
               startView = { type, param: '', sort };
             } else if (searchParam) {
               startView = { type: 'search', param: searchParam, sort: 'title_asc' };
+            } else if (shareType && shareId) {
+              const sort = (shareType === 'playlist') ? 'manual_order' : 'title_asc';
+              startView = { type: `${shareType}_songs`, param: shareId, sort };
             } else {
               const saved = localStorage.getItem('php_music_last_view');
               if (saved) {
-                try { startView = JSON.parse(saved); } catch (e) {}
+                try {
+                  const parsed = JSON.parse(saved);
+                  if (parsed && typeof parsed === 'object') {
+                    if (parsed.type === 'get_playlists') parsed.type = 'get_user_playlists';
+                    startView = parsed;
+                  }
+                } catch (e) {}
               }
             }
           }
 
-          if (!startView) startView = { type: 'get_songs', param: '', sort: 'title_asc' };
+          if (!startView || !startView.type) startView = { type: 'get_songs', param: '', sort: 'title_asc' };
 
           loadView(startView, false);
           history.replaceState(startView, '', buildViewUrl(startView));
