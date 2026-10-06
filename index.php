@@ -1107,6 +1107,9 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
       body.player-visible {
         padding-bottom: 140px;
       }
+      .rounded-3px {
+        border-radius: 3px;
+      }
       .text-truncate {
         white-space: nowrap !important;
         overflow: hidden !important;
@@ -1114,7 +1117,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
       }
       ::-webkit-scrollbar { width: 8px; height: 8px; }
       ::-webkit-scrollbar-track { background: var(--ytm-surface); }
-      ::-webkit-scrollbar-thumb { background: var(--ytm-surface-2); border-radius: 8px; }
+      ::-webkit-scrollbar-thumb { background: var(--ytm-surface-2); border-radius: 3px; }
       ::-webkit-scrollbar-thumb:hover { background: #555; }
       .app-container {
         display: flex;
@@ -1149,7 +1152,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         margin-bottom: 2rem;
         padding: 1rem;
         background-color: var(--ytm-surface);
-        border-radius: 8px;
+        border-radius: 3px;
       }
       .view-details-header-info {
         min-width: 0;
@@ -1159,7 +1162,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         width: 150px;
         height: 150px;
         object-fit: cover;
-        border-radius: 8px;
+        border-radius: 3px;
         flex-shrink: 0;
         background-color: var(--ytm-surface-2);
       }
@@ -1207,7 +1210,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         }
         .song-item {
           cursor: pointer;
-          border-radius: 8px;
+          border-radius: 3px;
         }
         .song-artist-mobile {
           display: none !important;
@@ -1244,6 +1247,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
       .nav-link:hover, .nav-link.active {
         background-color: var(--ytm-surface);
         color: var(--ytm-primary-text);
+        border-radius: 0 3px 3px 0;
       }
       .nav-link.active {
         border-left-color: var(--ytm-accent);
@@ -1283,7 +1287,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         background-color: var(--ytm-surface-2);
         color: var(--ytm-primary-text);
         border: 1px solid #404040;
-        border-radius: 8px;
+        border-radius: 3px;
         padding: 0.25rem 0.5rem;
       }
       .search-bar.input-group {
@@ -1339,7 +1343,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         padding: 0.6rem 1rem;
         font-size: 0.9rem;
         color: var(--ytm-secondary-text);
-        border-radius: 8px;
+        border-radius: 3px;
         border: none !important;
       }
       .song-list-header {
@@ -1359,7 +1363,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         width: 40px;
         height: 40px;
         object-fit: cover;
-        border-radius: 8px;
+        border-radius: 3px;
         background-color: var(--ytm-surface);
       }
       .song-item .song-more {
@@ -1372,17 +1376,17 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         color: var(--ytm-secondary-text);
         padding: 5px;
         cursor: pointer;
-        border-radius: 8px;
+        border-radius: 3px;
       }
       .song-item:hover .more-btn, .playlist-more-btn:hover {
         color: var(--ytm-primary-text);
       }
       .card.playlist-card {
         position: relative;
-        border-radius: 8px;
+        border-radius: 3px;
       }
       .card-img-top:not(.rounded-circle) {
-        border-radius: 8px;
+        border-radius: 3px;
       }
       .playlist-more-btn {
         position: absolute;
@@ -1399,7 +1403,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         display: none;
         position: fixed;
         background-color: var(--ytm-surface-2);
-        border-radius: 8px;
+        border-radius: 3px;
         box-shadow: 0 8px 24px rgba(0,0,0,0.6);
         z-index: 2050;
         list-style: none;
@@ -1449,7 +1453,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         width: 56px;
         height: 56px;
         object-fit: cover;
-        border-radius: 8px;
+        border-radius: 3px;
         flex-shrink: 0;
       }
       .player-bar .track-info-text {
@@ -1474,7 +1478,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         display: flex;
         align-items: center;
         justify-content: space-between !important;
-        width: 100% !important;
+        width: 45% !important;
       }
       .player-btn {
         background: none;
@@ -1487,7 +1491,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         justify-content: center;
         cursor: pointer;
         transition: color 0.2s;
-        border-radius: 8px;
+        border-radius: 3px;
       }
       .player-btn:hover {
         color: var(--ytm-primary-text);
@@ -1528,7 +1532,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
       .progress-bar-container {
         flex-grow: 1;
         height: 4px;
-        border-radius: 8px;
+        border-radius: 3px;
         cursor: pointer;
         padding: 5px 0;
         position: relative;
@@ -1537,7 +1541,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
       .progress-bar-bg {
         height: 4px;
         background-color: #404040;
-        border-radius: 8px;
+        border-radius: 3px;
         position: absolute;
         top: 5px;
         left: 0;
@@ -1547,7 +1551,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
       .progress-bar-fg {
         height: 4px;
         background-color: var(--ytm-primary-text);
-        border-radius: 8px;
+        border-radius: 3px;
         width: 0%;
         position: relative;
       }
@@ -1590,7 +1594,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         outline: none;
         padding: 0;
         height: 4px;
-        border-radius: 8px;
+        border-radius: 3px;
         background: var(--ytm-surface-2);
       }
       #volume-slider.form-range::-webkit-slider-runnable-track {
@@ -1629,7 +1633,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
       .modal-content {
         background-color: var(--ytm-surface);
         border: none;
-        border-radius: 8px;
+        border-radius: 3px;
       }
       .modal-footer {
         border-top: 1px solid var(--ytm-surface-2);
@@ -1638,7 +1642,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         background-color: var(--ytm-surface-2);
         border: 1px solid #404040;
         color: var(--ytm-primary-text);
-        border-radius: 8px;
+        border-radius: 3px;
       }
       .form-control:focus, .form-select:focus {
         background-color: var(--ytm-surface-2);
@@ -1650,7 +1654,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         border: none !important;
         outline: none !important;
         box-shadow: none !important;
-        border-radius: 8px;
+        border-radius: 3px;
         transition: background-color 0.2s ease, color 0.2s ease;
       }
       .btn:not(.btn-danger):not(.btn-outline-danger):not(.player-btn):not(#search-btn-desktop):not(#search-btn-mobile) {
@@ -1880,7 +1884,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         max-width: 100% !important;
         aspect-ratio: 1/1;
         object-fit: cover;
-        border-radius: 8px;
+        border-radius: 3px;
         box-shadow: 0 8px 24px rgba(0,0,0,0.5);
         display: block;
       }
@@ -1950,14 +1954,14 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
         <div class="offcanvas-header">
           <div class="logo">
             <img src="?action=get_app_icon&size=64" alt="logo">
-            PHP<span>Music</span> Lite
+            PHP<span>MusicLite</span>
           </div>
           <button type="button" class="btn-close btn-close-white" data-bs-dismiss="offcanvas" data-bs-target="#main-nav-offcanvas" aria-label="Close"></button>
         </div>
         <div class="offcanvas-body d-flex flex-column">
           <div class="logo d-none d-md-flex">
             <img src="?action=get_app_icon&size=64" alt="logo">
-            PHP<span>Music</span> <small class="text-danger fs-6">Lite</small>
+            PHP<span>MusicLite</span>
           </div>
           <a href="#" class="nav-link active" data-view="get_songs">
             <i class="bi bi-music-note-list"></i>
@@ -2726,7 +2730,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
               <div class="col">
                 <div class="card h-100 bg-transparent text-white border-0 playlist-card" data-${dataType}="${encodeURIComponent(dataVal)}" style="cursor: pointer;">
                   ${moreBtn}
-                  <img src="?action=get_image&id=${imageId}" class="card-img-top ${isRound ? 'rounded-circle' : 'rounded'}" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);" loading="lazy">
+                  <img src="?action=get_image&id=${imageId}" class="card-img-top ${isRound ? 'rounded-circle' : 'rounded-3px'}" alt="${name}" style="aspect-ratio: 1/1; object-fit: cover; background-color: var(--ytm-surface-2);" loading="lazy">
                   <div class="card-body px-0 py-2">
                     <h5 class="card-title fs-6 fw-normal text-truncate">${name}</h5>
                     ${subtext ? `<p class="card-text small text-secondary text-truncate">${subtext}</p>` : ''}
@@ -3421,7 +3425,7 @@ if (isset($_GET['share_type']) && isset($_GET['id'])) {
               const playlists = await fetchData('?action=get_user_playlists');
               if (playlists && playlists.length > 0) {
                 addToPlaylistModalBody.innerHTML = playlists.map(p =>
-                  `<button class="list-group-item list-group-item-action bg-transparent text-white border-0 text-truncate my-1 p-2 rounded add-to-playlist-item" data-playlist-id="${p.id}">${p.name}</button>`
+                  `<button class="list-group-item list-group-item-action bg-transparent text-white border-0 text-truncate my-1 p-2 rounded-3px add-to-playlist-item" data-playlist-id="${p.id}">${p.name}</button>`
                 ).join('');
               } else {
                 addToPlaylistModalBody.innerHTML = '<p class="text-secondary text-center mb-0">No playlists found. Create one first!</p>';
